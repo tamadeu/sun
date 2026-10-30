@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-runtime", "crates/sun-codegen-llvm", "crates/sun-cli"]
-default-members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-runtime", "crates/sun-cli"]
+default-members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-runtime", "crates/sun-codegen-llvm", "crates/sun-cli"]
 
 [workspace.package]
 version = "0.1.0"
