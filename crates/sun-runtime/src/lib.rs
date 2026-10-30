@@ -4,8 +4,12 @@ mod parallel;
 mod numeric;
 mod matrix_csv;
 mod graphics;
+mod graphics3d;
+mod debug;
 
+pub use debug::{DebugAction, DebugBreakpoint, DebugController, DebugFrame, DebugLocation, DebugNumber, DebugSnapshot, DebugSource, DebugStopReason, DebugVariable};
 pub use graphics::{Figure, FigureEvent, FigureLayout, FigureTrace};
+pub use graphics3d::{Curve3D, Scene3D};
 
 use std::{collections::HashMap, io, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 use sun_ast::{BinaryOp, Expr, ExprKind, FunctionDefinition, Module, Stmt, StmtKind, UnaryOp};
@@ -129,6 +133,14 @@ pub type CancellationFlag = Arc<AtomicBool>;
 pub trait RuntimeHost {
     fn write_line(&mut self, line: &str) -> io::Result<()>;
 
+    fn debug_enabled(&self) -> bool { false }
+
+    fn debug_checkpoint(&mut self, _location: &DebugLocation, _depth: usize) -> io::Result<Option<DebugStopReason>> { Ok(None) }
+
+    fn debug_pause(&mut self, _snapshot: &DebugSnapshot) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "debugging requires a debugger host"))
+    }
+
     fn figure_event(&mut self, _event: &FigureEvent) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "figure output requires a graphical host; use Sun Studio"))
     }
@@ -186,9 +198,25 @@ struct ExecutionContext<'a> {
     functions: &'a HashMap<String, Arc<FunctionDefinition>>,
     call_depth: usize,
     graphics: &'a mut graphics::GraphicsState,
+    debug: debug::DebugState,
+    function_sources: &'a HashMap<String, Arc<DebugSource>>,
 }
 
 impl ExecutionContext<'_> {
+    fn debug_statement(&mut self, span: sun_source::Span, env: &HashMap<String, Value>) -> Result<(), RuntimeError> {
+        if !self.debug.enabled { return Ok(()); }
+        self.debug.span = span;
+        let Some(source) = &self.debug.source else { return Ok(()); };
+        let location = source.location(span);
+        if let Some(reason) = self.host.debug_checkpoint(&location, self.call_depth)? {
+            let mut frames = self.debug.callers.clone();
+            if let Some(frame) = self.debug.frame(env) { frames.push(frame); }
+            self.host.debug_pause(&DebugSnapshot { reason, frames, depth: self.call_depth })?;
+            self.check_cancelled()?;
+        }
+        Ok(())
+    }
+
     fn check_cancelled(&self) -> Result<(), RuntimeError> {
         if self.cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) { Err(RuntimeError::Cancelled) }
         else { Ok(()) }
@@ -234,6 +262,7 @@ pub struct Session {
     pause_enabled: bool,
     functions: HashMap<String, Arc<FunctionDefinition>>,
     graphics: graphics::GraphicsState,
+    function_sources: HashMap<String, Arc<DebugSource>>,
 }
 
 impl Default for Session {
@@ -241,7 +270,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self { Self { variables: HashMap::new(), pause_enabled: true, functions: HashMap::new(), graphics: graphics::GraphicsState::default() } }
+    pub fn new() -> Self { Self { variables: HashMap::new(), pause_enabled: true, functions: HashMap::new(), graphics: graphics::GraphicsState::default(), function_sources: HashMap::new() } }
 
     pub fn variables(&self) -> &HashMap<String, Value> { &self.variables }
 
@@ -249,24 +278,38 @@ impl Session {
 
     pub fn figure(&self) -> Option<&Figure> { self.graphics.current.as_ref() }
 
+    pub fn debug_sources(&self) -> impl Iterator<Item = &DebugSource> { self.function_sources.values().map(Arc::as_ref) }
+
     pub fn clear(&mut self) {
         self.variables.clear();
         self.pause_enabled = true;
         self.functions.clear();
         self.graphics = graphics::GraphicsState::default();
+        self.function_sources.clear();
     }
 
     pub fn execute(&mut self, module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
+        self.execute_source(module, host, None)
+    }
+
+    pub fn execute_with_source(&mut self, module: &Module, host: &mut dyn RuntimeHost, source: DebugSource) -> Result<(), RuntimeError> {
+        self.execute_source(module, host, Some(Arc::new(source)))
+    }
+
+    fn execute_source(&mut self, module: &Module, host: &mut dyn RuntimeHost, source: Option<Arc<DebugSource>>) -> Result<(), RuntimeError> {
         validate_parallel_blocks(module)?;
         let cancelled = host.cancellation_flag();
         if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) { return Err(RuntimeError::Cancelled); }
         for statement in &module.statements {
             if let StmtKind::Function(function) = &statement.kind {
                 self.functions.insert(function.name.clone(), Arc::new(function.clone()));
+                if let Some(source) = &source { self.function_sources.insert(function.name.clone(), source.clone()); }
+                else { self.function_sources.remove(&function.name); }
             }
         }
+        let debug = debug::DebugState { enabled: host.debug_enabled() && source.is_some(), source, ..debug::DebugState::default() };
         let mut context = ExecutionContext { host, pause_enabled: self.pause_enabled, index_end: None, cancelled,
-            functions: &self.functions, call_depth: 0, graphics: &mut self.graphics };
+            functions: &self.functions, call_depth: 0, graphics: &mut self.graphics, debug, function_sources: &self.function_sources };
         let result = execute_statements(&module.statements, &mut self.variables, &mut context).and_then(|flow| match flow {
             ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
             ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
@@ -356,6 +399,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
     output.check_cancelled()?;
     for statement in statements {
         output.check_cancelled()?;
+        if !matches!(statement.kind, StmtKind::Function(_) | StmtKind::While { .. }) { output.debug_statement(statement.span, env)?; }
         match &statement.kind {
             StmtKind::Function(_) => {}
             StmtKind::Assign { name, value } => {
@@ -446,6 +490,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                 let range = NumericRange::new(start, step, stop)?;
                 let mut previous = None;
                 for index in 0..range.length {
+                    if index > 0 { output.debug_statement(statement.span, env)?; }
                     let value = range.value_at(index);
                     if !value.is_finite() || previous == Some(value) {
                         return Err(RuntimeError::InvalidForRange("step cannot produce distinct finite iteration values".into()));
@@ -472,6 +517,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                         if matrix.is_empty() { continue; }
                         let (rows, cols) = matrix.shape();
                         for column in 1..=cols {
+                            if column > 1 { output.debug_statement(statement.span, env)?; }
                             let value = if rows == 1 {
                                 Value::Number(matrix.get(1, column)?)
                             } else {
@@ -489,7 +535,10 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                 }
             }
             StmtKind::While { condition, body } => {
-                while scalar_condition(eval(condition, env, output)?, "while")? {
+                loop {
+                    output.check_cancelled()?;
+                    output.debug_statement(statement.span, env)?;
+                    if !scalar_condition(eval(condition, env, output)?, "while")? { break; }
                     match execute_statements(body, env, output)? {
                         ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
                         ExecutionFlow::Break => break,
@@ -499,7 +548,8 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
             }
             StmtKind::If { branches, else_body } => {
                 let mut selected_body = else_body.as_slice();
-                for (condition, body) in branches {
+                for (index, (condition, body)) in branches.iter().enumerate() {
+                    if index > 0 { output.debug_statement(condition.span, env)?; }
                     if scalar_condition(eval(condition, env, output)?, "if")? {
                         selected_body = body;
                         break;
@@ -512,6 +562,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                 let selector = switch_value(eval(selector, env, output)?, "selector")?;
                 let mut selected_body = otherwise_body.as_slice();
                 for (case, body) in cases {
+                    output.debug_statement(case.span, env)?;
                     let case = switch_value(eval(case, env, output)?, "case expression")?;
                     if selector == case {
                         selected_body = body;
@@ -693,7 +744,7 @@ fn eval_expression(expr: &Expr, env: &HashMap<String, Value>, output: &mut Execu
         }
         ExprKind::Identifier(name) => match env.get(name) {
             Some(value) => Ok(value.clone()),
-            None if name == "pause" => call_function(name, Vec::new(), output, allow_void),
+            None if name == "pause" => call_function(name, Vec::new(), env, output, allow_void),
             None => Err(RuntimeError::UndefinedVariable(name.clone())),
         },
         ExprKind::FieldAccess { object, field } => {
@@ -786,12 +837,12 @@ fn eval_expression(expr: &Expr, env: &HashMap<String, Value>, output: &mut Execu
             }
             let mut args = Vec::with_capacity(arguments.len());
             for arg in arguments { args.push(eval(arg, env, output)?); }
-            call_function(name, args, output, allow_void)
+            call_function(name, args, env, output, allow_void)
         }
     }
 }
 
-fn call_function(name: &str, args: Vec<Value>, context: &mut ExecutionContext<'_>, allow_void: bool) -> Result<Value, RuntimeError> {
+fn call_function(name: &str, args: Vec<Value>, caller_env: &HashMap<String, Value>, context: &mut ExecutionContext<'_>, allow_void: bool) -> Result<Value, RuntimeError> {
     let Some(function) = context.functions.get(name).cloned() else {
         if (name == "writematrix" || graphics::handles(name)) && !allow_void { return Err(RuntimeError::NoOutput(name.into())); }
         return call(name, args, context);
@@ -804,6 +855,14 @@ fn call_function(name: &str, args: Vec<Value>, context: &mut ExecutionContext<'_
     if context.call_depth >= 32 { return Err(RuntimeError::RecursionLimit); }
     let mut locals: HashMap<String, Value> = function.parameters.iter().cloned().zip(args).collect();
     let previous_end = context.index_end.take();
+    let mut pushed = false;
+    let previous_debug = if context.debug.enabled {
+        if let Some(frame) = context.debug.frame(caller_env) { context.debug.callers.push(frame); pushed = true; }
+        let previous = (context.debug.source.take(), context.debug.name.clone(), context.debug.span);
+        context.debug.source = context.function_sources.get(name).cloned();
+        context.debug.name = name.into();
+        Some(previous)
+    } else { None };
     context.call_depth += 1;
     let result = (|| {
         match execute_statements(&function.body, &mut locals, context)? {
@@ -819,6 +878,10 @@ fn call_function(name: &str, args: Vec<Value>, context: &mut ExecutionContext<'_
     })();
     context.call_depth -= 1;
     context.index_end = previous_end;
+    if let Some((source, name, span)) = previous_debug {
+        if pushed { context.debug.callers.pop(); }
+        context.debug.source = source; context.debug.name = name; context.debug.span = span;
+    }
     result
 }
 

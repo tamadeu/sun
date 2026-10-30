@@ -1,0 +1,8 @@
+t = 0:0.1:12;
+plot3(cos(t), sin(t), t);
+title("Helice");
+xlabel("X");
+ylabel("Y");
+zlabel("Altura");
+legend("Trajetoria");
+grid(true);

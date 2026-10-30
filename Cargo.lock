@@ -695,6 +695,7 @@ dependencies = [
  "sun-ast",
  "sun-numeric",
  "sun-parser",
+ "sun-source",
  "tempfile",
  "thiserror",
 ]

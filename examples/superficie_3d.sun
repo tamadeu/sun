@@ -1,0 +1,10 @@
+x = -2:0.2:2;
+y = transpose(x);
+Z = x .* x + y .* y;
+surf(x, y, Z);
+title("Paraboloide");
+xlabel("X");
+ylabel("Y");
+zlabel("Z");
+grid(true);
+axis([-2, 2, -2, 2, 0, 8]);

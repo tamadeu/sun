@@ -213,7 +213,8 @@ mod tests {
         let mut host = CollectingHost { lines: Vec::new() };
         let mut session = Session::new();
         let context = ExecutionContext { host: &mut host, pause_enabled: true, index_end: None,
-            cancelled: None, functions: &session.functions, call_depth: 0, graphics: &mut session.graphics };
+            cancelled: None, functions: &session.functions, call_depth: 0, graphics: &mut session.graphics,
+            debug: crate::debug::DebugState::default(), function_sources: &session.function_sources };
         assert!(matches!(read_matrix(&b"1,2\n3,4\n"[..], &context, 4), Err(RuntimeError::InvalidArgument(_))));
         assert!(read_matrix(&b"1,2\n"[..], &context, 4).is_ok());
         let matrix = SunMatrix::from_rows(vec![vec![1.0,2.0]]).unwrap();
@@ -233,7 +234,8 @@ mod tests {
         let mut host = CollectingHost { lines: Vec::new() };
         let mut session = Session::new();
         let context = ExecutionContext { host: &mut host, pause_enabled: true, index_end: None,
-            cancelled: None, functions: &session.functions, call_depth: 0, graphics: &mut session.graphics };
+            cancelled: None, functions: &session.functions, call_depth: 0, graphics: &mut session.graphics,
+            debug: crate::debug::DebugState::default(), function_sources: &session.function_sources };
         let input = b"\xef\xbb\xbf\"1\",\"2\"\r\n\"3\",\"4\"";
         assert_eq!(read_matrix(Chunked(input), &context, 100).unwrap().to_rows(), [[1.0,2.0],[3.0,4.0]]);
         assert!(matches!(read_matrix(Chunked(b"\"1\"0,2\n"), &context, 100), Err(RuntimeError::Csv(_))));

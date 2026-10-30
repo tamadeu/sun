@@ -1,5 +1,5 @@
 use serde::Serialize;
-use super::{ExecutionContext, RuntimeError, Value};
+use super::{ExecutionContext, RuntimeError, Scene3D, Value};
 
 const MAX_POINTS: usize = 10_000;
 const MAX_TRACES: usize = 16;
@@ -16,11 +16,13 @@ pub struct FigureLayout {
     pub title: String,
     pub x_label: String,
     pub y_label: String,
+    pub z_label: String,
     pub legend: Vec<String>,
     pub show_legend: bool,
     pub grid: bool,
     pub x_range: Option<[f64; 2]>,
     pub y_range: Option<[f64; 2]>,
+    pub z_range: Option<[f64; 2]>,
     pub axis_revision: u32,
 }
 
@@ -29,6 +31,12 @@ pub struct Figure {
     pub id: u32,
     pub traces: Vec<FigureTrace>,
     pub layout: FigureLayout,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene: Option<Scene3D>,
+}
+
+impl Figure {
+    fn series_count(&self) -> usize { self.scene.as_ref().map_or(self.traces.len(), Scene3D::series_count) }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -46,7 +54,7 @@ pub(super) struct GraphicsState {
 }
 
 pub(super) fn handles(name: &str) -> bool {
-    matches!(name, "plot" | "title" | "xlabel" | "ylabel" | "legend" | "grid" | "axis" | "clf")
+    matches!(name, "plot" | "plot3" | "surf" | "title" | "xlabel" | "ylabel" | "zlabel" | "legend" | "grid" | "axis" | "clf")
 }
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidArgument(message.into()) }
@@ -102,13 +110,16 @@ pub(super) fn call(name: &str, args: &[Value], context: &mut ExecutionContext<'_
         context.graphics.current = None;
         return Ok(Value::Void);
     }
-    if name == "plot" {
-        if args.len() != 2 { return Err(RuntimeError::Arity(name.into(), "two numeric arguments: plot(x, y)".into())); }
-        let traces = traces(&args[0], &args[1])?;
-        let layout = FigureLayout { legend: (1..=traces.len()).map(|index| format!("Serie {index}")).collect(),
-            show_legend: traces.len() > 1, ..FigureLayout::default() };
+    if matches!(name, "plot" | "plot3" | "surf") {
+        let (traces, scene) = if name == "plot" {
+            if args.len() != 2 { return Err(RuntimeError::Arity(name.into(), "two numeric arguments: plot(x, y)".into())); }
+            (traces(&args[0], &args[1])?, None)
+        } else { (Vec::new(), Some(super::graphics3d::prepare(name, args)?)) };
+        let count = scene.as_ref().map_or(traces.len(), Scene3D::series_count);
+        let layout = FigureLayout { legend: (1..=count).map(|index| format!("Serie {index}")).collect(),
+            show_legend: count > 1, ..FigureLayout::default() };
         let id = context.graphics.next_id.checked_add(1).ok_or_else(|| invalid("figure ID limit reached; clear the session"))?;
-        let figure = Figure { id, traces, layout };
+        let figure = Figure { id, traces, layout, scene };
         context.check_cancelled()?;
         context.host.figure_event(&FigureEvent::Figure { figure: figure.clone() })?;
         context.graphics.current = Some(figure);
@@ -118,10 +129,11 @@ pub(super) fn call(name: &str, args: &[Value], context: &mut ExecutionContext<'_
     let figure = context.graphics.current.as_ref().ok_or_else(|| invalid("plot must create a figure before changing its labels or axes"))?;
     let mut layout = figure.layout.clone();
     match name {
-        "title" | "xlabel" | "ylabel" => {
+        "title" | "xlabel" | "ylabel" | "zlabel" => {
+            if name == "zlabel" && figure.scene.is_none() { return Err(invalid("zlabel requires a 3D figure")); }
             if args.len() != 1 { return Err(RuntimeError::Arity(name.into(), "one string".into())); }
             let label = text(&args[0])?;
-            match name { "title" => layout.title = label, "xlabel" => layout.x_label = label, _ => layout.y_label = label }
+            match name { "title" => layout.title = label, "xlabel" => layout.x_label = label, "ylabel" => layout.y_label = label, _ => layout.z_label = label }
         }
         "grid" => layout.grid = match args {
             [] => !layout.grid,
@@ -131,21 +143,23 @@ pub(super) fn call(name: &str, args: &[Value], context: &mut ExecutionContext<'_
         },
         "legend" => match args {
             [Value::String(state)] if state == "on" || state == "off" => layout.show_legend = state == "on",
-            labels if labels.len() == figure.traces.len() => {
+            labels if labels.len() == figure.series_count() => {
                 layout.legend = labels.iter().map(text).collect::<Result<_, _>>()?;
                 layout.show_legend = true;
             }
             _ => return Err(RuntimeError::Arity(name.into(), "one string per curve or 'on'/'off'".into())),
         },
         "axis" => { match args {
-            [Value::String(mode)] if mode == "auto" => { layout.x_range = None; layout.y_range = None; }
+            [Value::String(mode)] if mode == "auto" => { layout.x_range = None; layout.y_range = None; layout.z_range = None; }
             [limits] => {
                 let limits = vector(limits)?;
-                if limits.len() != 4 || !limits.iter().all(|value| value.is_finite()) || limits[0] >= limits[1] || limits[2] >= limits[3] {
-                    return Err(invalid("axis expects [xmin, xmax, ymin, ymax] with finite increasing bounds"));
+                let count = if figure.scene.is_some() { 6 } else { 4 };
+                if limits.len() != count || !limits.iter().all(|value| value.is_finite()) || limits.chunks_exact(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(invalid("axis expects finite increasing bounds: four for 2D, six for 3D"));
                 }
                 layout.x_range = Some([limits[0], limits[1]]);
                 layout.y_range = Some([limits[2], limits[3]]);
+                if count == 6 { layout.z_range = Some([limits[4], limits[5]]); }
             }
             _ => return Err(invalid("axis expects four limits or 'auto'")),
         }

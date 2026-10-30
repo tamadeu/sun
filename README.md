@@ -821,7 +821,51 @@ Pushing a version tag such as `v0.1.0` runs tests and builds release binaries fo
 
 ## Current status
 
-This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives and assignment, interpreter, user-defined functions, persistent REPL, numeric CSV, initial 2D plotting in Studio, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, dynamic native indexing, and richer graphics remain future milestones.
+This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives and assignment, interpreter, user-defined functions, persistent REPL, numeric CSV, initial 2D/3D plotting in Studio, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, dynamic native indexing, and richer graphics remain future milestones.
+
+### Interpreter debugger
+
+Sun Studio can debug editor buffers, including unsaved scripts, using the real
+Rust interpreter. Click the editor glyph margin or press F9 to toggle a
+breakpoint, then use Debug/F5. Execution stops before the first executable
+instruction; Continue/F5 runs to a breakpoint or completion. F10 steps over a
+call, F11 steps into user functions, and Shift+F11 steps out. Ctrl/Cmd+F5 keeps
+ordinary Run behavior. The pause button requests a stop at the next instruction
+boundary, and Shift+F5/Stop cancels execution.
+
+The Debug panel shows the call stack and variables of the selected frame.
+Selecting a caller inspects its suspended scope without changing where the
+program will resume. Matrices retain their full dimensions with a bounded 5x5
+preview; inspection never evaluates Sun expressions or mutates variables.
+The global Workspace still refreshes on completion; select the script frame
+to inspect its current values while paused. Each frame reports up to 100
+variables, names up to 200 characters and bounded text previews. The existing
+32-call recursion limit permits a script frame plus 32 function frames.
+
+Functions retain their original source across session commands. Source
+identities are SHA-256 hashes of source name and contents, not positions in
+recent command history. If the editor has changed since a function definition,
+the debugger opens a read-only source snapshot instead of overwriting edits or
+highlighting lines in the wrong version. Editor text is read-only during a
+debug run. Breakpoints apply to exact source versions; comments, delimiters and
+other nonexecutable lines are shown as unverified. A breakpoint can still stop
+inside a call when stepping over or out.
+
+Stepping is statement-based: several instructions on one line can produce
+several stops on that line. Loop headers are revisited, including empty loops.
+Parallel loops are atomic to this debugger; worker-body breakpoints and native
+code debugging are not implemented. Long individual numeric/filesystem calls
+may not pause immediately. Cancellation unwinds function locals while retaining
+completed script assignments and effects; forced engine termination loses the
+session explicitly. Errors caught by Sun try/catch unwind frames normally.
+Conditional breakpoints, hit counts, watches, expression evaluation, variable
+editing, stop-on-exception and time-travel debugging remain future work.
+
+Open `examples/depuracao.sun`, set a breakpoint on line 7, and debug it to inspect
+`valor`, `local` and `matriz` inside `dobro`. Its final result is 8. Checks and
+ordinary runs do not activate breakpoints. The integrated debugger requires a
+session engine advertising the `debugger` capability; an older engine is
+rejected without discarding its existing Workspace.
 
 ### 2D figures
 
@@ -878,13 +922,94 @@ Plotting commands return no value and are forbidden inside `parfor`. `check`
 does not create or modify figures. A plain terminal host reports an explicit
 error directing users to Sun Studio rather than silently discarding graphics.
 The native backend also rejects these commands. Multiple simultaneous figures,
-`hold`, subplots, style strings, logarithmic axes, 3D graphics and animations
+`hold`, subplots, style strings, logarithmic axes and animations
 are not implemented in this initial version.
 
 Open and execute `examples/graficos.sun` in Studio. Syntax can also be checked:
 
 ```sh
 cargo run -p sun -- check examples/graficos.sun
+```
+
+### 3D curves and surfaces
+
+Sun Studio supports `plot3(x,y,z)` and `surf` through locally bundled Three.js.
+The Rust runtime validates data and builds curve connectivity or surface
+triangles; JavaScript only projects and renders the resulting figure events.
+No Sun expressions are evaluated in the renderer. Existing 2D figures continue
+using Plotly and do not load the Three.js renderer until needed.
+
+```matlab
+t = 0:0.1:12;
+plot3(cos(t), sin(t), t);
+title("Helice");
+zlabel("Altura");
+grid(true);
+```
+
+`plot3` accepts three equal-length numeric vectors or three scalars. For several
+curves, X/Y/Z may instead be matrices of the same shape, with one curve per
+column. Mixing coordinate vectors with nonvector matrices is not supported.
+Nonfinite triples produce gaps, and each curve needs a finite point. Existing
+limits of 16 curves and 10,000 total input points apply.
+
+Surfaces accept `surf(Z)`, `surf(x,y,Z)` with x/y vectors matching the columns
+and rows of Z, or `surf(X,Y,Z)` with equal-shaped coordinate matrices. Z needs
+at least 2x2 cells and at most 10,000 grid points. The one-argument form uses
+1-based column/row coordinates. Rust triangulates adjacent cells, omits
+triangles touching nonfinite data, rejects fully degenerate surfaces and
+removes vertices not referenced by any surviving face. This keeps the visible
+bounds independent of isolated unusable samples.
+
+```matlab
+x = -2:0.2:2;
+y = transpose(x);
+Z = x .* x + y .* y;
+surf(x, y, Z);
+title("Paraboloide");
+xlabel("X"); ylabel("Y"); zlabel("Z");
+grid(true);
+axis([-2, 2, -2, 2, 0, 8]);
+```
+
+Titles, labels, legend, grid, `clf()` and session lifetime are shared with 2D
+figures. `zlabel` requires 3D, and `axis` takes six increasing bounds in 3D:
+`[xmin,xmax,ymin,ymax,zmin,zmax]`. `axis("auto")` restores data bounds. A new
+plot or explicit axis command restores the initial camera; metadata/theme
+changes preserve an interactive camera. Orbit controls support rotation, zoom
+and pan, with buttons for camera reset and PNG export. Export includes title,
+axis labels, legend and the surface height-color scale, up to 2x viewport
+resolution capped at 4096 pixels per dimension.
+
+Rendering maps each axis independently into a unit cube; it does not imply
+equal physical axis scales. Camera projection is perspective. View clipping
+uses double precision before Float32 GPU conversion to preserve intersections
+with very large coordinate magnitudes. Tick and color-scale precision adapts
+to distinguish nearby values. Text may be shortened and crowded ticks hidden
+to fit narrow views; full metadata remains in the figure tooltip.
+
+WebGL2 is required, through a GPU or a working software implementation. An
+unavailable/lost context reports an explicit error rather than substituting a
+fake chart. Contexts, controls, geometry and materials are released on clear,
+session reset and 2D/3D replacement. The headless Linux E2E harness uses
+the application's explicit software-rendering mode; normal launches do not
+enable unsafe software-rendering flags unless the user opts in. If Chromium
+reports `Error creating WebGL context`, save work, close Studio and try
+`sun-studio --software-rendering`, or use the error panel's software/restart
+action. The confirmation explains the CPU/security tradeoff and loss of
+unsaved/session state. This setting requires restarting Studio, not just its
+Rust engine. `--automatic-rendering` selects the normal default again.
+Surface color maps and point picking are not configurable yet. `mesh`,
+`meshgrid`, `scatter3`, transparency options, equal-axis aspect, orthographic
+projection, `hold`, subplots and multiple active figures remain future work.
+3D effects are interpreter-only and forbidden in `parfor`, like 2D effects.
+
+Open `examples/graficos_3d.sun` or `examples/superficie_3d.sun` in Studio.
+Syntax checking remains available without a graphics host:
+
+```sh
+cargo run -p sun -- check examples/graficos_3d.sun
+cargo run -p sun -- check examples/superficie_3d.sun
 ```
 
 ### Numeric CSV import and export

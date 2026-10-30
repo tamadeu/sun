@@ -5,7 +5,7 @@ use sun_numeric::{MatrixError, SunMatrix};
 use super::{eval, index_number, ExecutionContext, NumericRange, RuntimeError, RuntimeHost, Value};
 
 const PURE_FUNCTIONS: &[&str] = &["sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "mean", "min", "max", "zeros", "ones", "eye", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
-const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "title", "xlabel", "ylabel", "legend", "grid", "axis", "clf"];
+const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "clf"];
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidParFor(message.into()) }
 
@@ -281,7 +281,9 @@ pub(super) fn execute(iterator: &str, start: &Expr, step: Option<&Expr>, stop: &
         let mut locals = plan.inputs.snapshot(globals);
         let mut host = QuietHost;
         let mut graphics = super::graphics::GraphicsState::default();
-        let mut context = ExecutionContext { host: &mut host, pause_enabled: false, index_end: None, cancelled: cancelled.clone(), functions, call_depth: 0, graphics: &mut graphics };
+        let sources = HashMap::new();
+        let mut context = ExecutionContext { host: &mut host, pause_enabled: false, index_end: None, cancelled: cancelled.clone(), functions, call_depth: 0, graphics: &mut graphics,
+            debug: super::debug::DebugState::default(), function_sources: &sources };
         let mut writes = Vec::new();
         for offset in (worker..length).step_by(workers) {
             context.check_cancelled()?;

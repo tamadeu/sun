@@ -1,0 +1,8 @@
+base = 10;
+resultado = dobro(3);
+disp(resultado);
+function saida = dobro(valor)
+    local = valor + 1;
+    matriz = ones(2, 2);
+    saida = local * 2;
+end

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 sun-ast = { path = "../sun-ast" }
 sun-numeric = { path = "../sun-numeric" }
+sun-source = { path = "../sun-source" }
 rayon = "1.11"
 csv = "1"
 tempfile = "3"
