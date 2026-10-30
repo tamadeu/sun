@@ -1,0 +1,8 @@
+[package]
+name = "sun-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sun-source = { path = "../sun-source" }
