@@ -10,7 +10,7 @@ source -> lexer -> parser -> AST -> LLVM IR -> native executable
 
 Semantic analysis and a stable Sun IR remain planned layers between the AST and LLVM.
 
-Native scalar math calls cross a C ABI bundled into each executable (`runtime/sun_runtime.c`). The runtime now also provides an opaque heap-backed `SunMatrix` ABI with 1-based access, shape queries, arithmetic operations, and explicit ownership. The LLVM generator still emits stack-backed matrices; migrating generated code to the matrix ABI is the next compiler milestone.
+Native scalar math calls cross a C ABI bundled into each executable (`runtime/sun_runtime.c`). The runtime now also provides an opaque heap-backed `SunMatrix` ABI with 1-based access, shape queries, arithmetic operations, and explicit ownership. The LLVM generator uses the heap-backed matrix ABI. The numeric crate also exposes borrowed, read-only matrix views for rectangular regions and transposition; these views retain the source allocation through Rust lifetimes and do not copy element data.
 
 ## Initial decisions
 
