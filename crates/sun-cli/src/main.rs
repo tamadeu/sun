@@ -83,12 +83,19 @@ fn compile_file(file: &Path, output: Option<&Path>) -> Result<(), Box<dyn std::e
     let ir_path = std::env::temp_dir().join(format!("sun-{}-{}.ll", std::process::id(),
         output_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output")));
     fs::write(&ir_path, ir)?;
+    // Embed the small C runtime with the executable so generated programs do
+    // not depend on a separately installed Sun runtime library.
+    let runtime_path = ir_path.with_extension("runtime.c");
+    fs::write(&runtime_path, include_str!("../../../runtime/sun_runtime.c"))?;
 
     let compiler = std::env::var_os("SUN_CLANG").unwrap_or_else(|| "clang".into());
     let result = ProcessCommand::new(compiler)
-        .arg("-x").arg("ir").arg(&ir_path).arg("-O2").arg("-o").arg(&output_path)
+        .arg("-x").arg("ir").arg(&ir_path)
+        .arg("-x").arg("c").arg(&runtime_path)
+        .arg("-O2").arg("-lm").arg("-o").arg(&output_path)
         .output();
     let _ = fs::remove_file(&ir_path);
+    let _ = fs::remove_file(&runtime_path);
     let result = result.map_err(|error| format!(
         "could not start Clang/LLVM ({error}). Install Clang 18+ or set SUN_CLANG to its executable path."
     ))?;
