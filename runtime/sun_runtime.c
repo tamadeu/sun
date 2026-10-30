@@ -59,16 +59,79 @@ double sun_matrix_get_indexed(const SunMatrix *m, double row, double col) {
   sun_runtime_fail("column index is not a finite in-bounds positive integer");
  return m->data[((size_t)row - 1) * m->cols + ((size_t)col - 1)];
 }
-/* Independent, contiguous buffers and an explicit SIMD loop contract allow
- * optimizing compilers to emit vector instructions without changing the ABI. */
+/* Runtime-dispatched elementwise kernels. x86 builds get AVX-512 or AVX2
+ * implementations when supported; every other CPU uses the portable loop.
+ * Target attributes keep the binary baseline-safe (no global -mavx flags). */
+enum { SUN_EW_ADD, SUN_EW_MUL, SUN_EW_SCALE, SUN_EW_DIV };
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+__attribute__((target("avx2")))
+static void sun_ew_avx2(const double *a,const double *b,double *out,
+                        size_t n,double scalar,int op) {
+ size_t i=0;
+ for(;i+4<=n;i+=4) {
+  __m256d x=_mm256_loadu_pd(a+i), y;
+  if(op==SUN_EW_ADD) y=_mm256_add_pd(x,_mm256_loadu_pd(b+i));
+  else if(op==SUN_EW_MUL) y=_mm256_mul_pd(x,_mm256_loadu_pd(b+i));
+  else if(op==SUN_EW_SCALE) y=_mm256_mul_pd(x,_mm256_set1_pd(scalar));
+  else y=_mm256_div_pd(x,_mm256_set1_pd(scalar));
+  _mm256_storeu_pd(out+i,y);
+ }
+ for(;i<n;i++) {
+  if(op==SUN_EW_ADD)out[i]=a[i]+b[i];
+  else if(op==SUN_EW_MUL)out[i]=a[i]*b[i];
+  else if(op==SUN_EW_SCALE)out[i]=a[i]*scalar;
+  else out[i]=a[i]/scalar;
+ }
+}
+__attribute__((target("avx512f")))
+static void sun_ew_avx512(const double *a,const double *b,double *out,
+                          size_t n,double scalar,int op) {
+ size_t i=0;
+ for(;i+8<=n;i+=8) {
+  __m512d x=_mm512_loadu_pd(a+i), y;
+  if(op==SUN_EW_ADD) y=_mm512_add_pd(x,_mm512_loadu_pd(b+i));
+  else if(op==SUN_EW_MUL) y=_mm512_mul_pd(x,_mm512_loadu_pd(b+i));
+  else if(op==SUN_EW_SCALE) y=_mm512_mul_pd(x,_mm512_set1_pd(scalar));
+  else y=_mm512_div_pd(x,_mm512_set1_pd(scalar));
+  _mm512_storeu_pd(out+i,y);
+ }
+ for(;i<n;i++) {
+  if(op==SUN_EW_ADD)out[i]=a[i]+b[i];
+  else if(op==SUN_EW_MUL)out[i]=a[i]*b[i];
+  else if(op==SUN_EW_SCALE)out[i]=a[i]*scalar;
+  else out[i]=a[i]/scalar;
+ }
+}
+#endif
+static void sun_elementwise_kernel(const double *a,const double *b,double *out,
+                                   size_t n,double scalar,int op) {
+#if defined(__x86_64__) || defined(__i386__)
+ __builtin_cpu_init();
+ if(__builtin_cpu_supports("avx512f")) {
+  sun_ew_avx512(a,b,out,n,scalar,op);return;
+ }
+ if(__builtin_cpu_supports("avx2")) {
+  sun_ew_avx2(a,b,out,n,scalar,op);return;
+ }
+#endif
+ for(size_t i=0;i<n;i++) {
+  if(op==SUN_EW_ADD)out[i]=a[i]+b[i];
+  else if(op==SUN_EW_MUL)out[i]=a[i]*b[i];
+  else if(op==SUN_EW_SCALE)out[i]=a[i]*scalar;
+  else out[i]=a[i]/scalar;
+ }
+}
+
+/* Independent, contiguous buffers preserve aliasing guarantees and the
+ * runtime ABI while the dispatcher selects the best supported kernel. */
 SunMatrix *sun_matrix_add(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->rows!=b->rows||a->cols!=b->cols)return NULL;
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
  const size_t count=a->rows*a->cols;
  const double * restrict lhs=a->data, * restrict rhs=b->data;
  double * restrict dst=o->data;
- #pragma omp simd
- for(size_t i=0;i<count;i++)dst[i]=lhs[i]+rhs[i];
+ sun_elementwise_kernel(lhs,rhs,dst,count,0.0,SUN_EW_ADD);
  return o;
 }
 SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
@@ -77,8 +140,7 @@ SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
  const size_t count=a->rows*a->cols;
  const double * restrict lhs=a->data, * restrict rhs=b->data;
  double * restrict dst=o->data;
- #pragma omp simd
- for(size_t i=0;i<count;i++)dst[i]=lhs[i]*rhs[i];
+ sun_elementwise_kernel(lhs,rhs,dst,count,0.0,SUN_EW_MUL);
  return o;
 }
 
@@ -115,8 +177,7 @@ SunMatrix *sun_matrix_scale(const SunMatrix*a,double x){
  const size_t count=a->rows*a->cols;
  const double * restrict src=a->data;
  double * restrict dst=o->data;
- #pragma omp simd
- for(size_t i=0;i<count;i++)dst[i]=src[i]*x;
+ sun_elementwise_kernel(src,NULL,dst,count,x,SUN_EW_SCALE);
  return o;
 }
 SunMatrix *sun_matrix_divide_scalar(const SunMatrix*a,double x){
@@ -125,8 +186,7 @@ SunMatrix *sun_matrix_divide_scalar(const SunMatrix*a,double x){
  const size_t count=a->rows*a->cols;
  const double * restrict src=a->data;
  double * restrict dst=o->data;
- #pragma omp simd
- for(size_t i=0;i<count;i++)dst[i]=src[i]/x;
+ sun_elementwise_kernel(src,NULL,dst,count,x,SUN_EW_DIV);
  return o;
 }
 void sun_matrix_print(const SunMatrix*m){
