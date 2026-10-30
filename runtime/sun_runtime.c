@@ -25,7 +25,7 @@ void sun_runtime_check_matrix(SunMatrix *matrix) {
 enum { SUN_MATRIX_OK=0, SUN_MATRIX_ERR_NULL=1, SUN_MATRIX_ERR_BOUNDS=2 };
 double sun_rt_sqrt(double x){return sqrt(x);} double sun_rt_sin(double x){return sin(x);}
 double sun_rt_cos(double x){return cos(x);} double sun_rt_exp(double x){return exp(x);}
-double sun_rt_log(double x){return log(x);} void sun_rt_print_f64(double x){printf("%g\n",x);}
+double sun_rt_log(double x){return log(x);} void sun_rt_print_f64(double x){printf("%g\\n",x);}
 SunMatrix *sun_matrix_create(size_t r,size_t c){
  if(!r||!c||r>SIZE_MAX/c||r*c>SIZE_MAX/sizeof(double))return NULL;
  SunMatrix*m=malloc(sizeof(*m));if(!m)return NULL;m->data=calloc(r*c,sizeof(double));
@@ -69,12 +69,29 @@ SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
  for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]*b->data[i];return o;
 }
+
+/* Cache-blocked row-major matrix multiplication. The inner j loop walks
+ * contiguous rows of B and C; k remains ascending for each output element. */
+#define SUN_MATRIX_MATMUL_BLOCK 32
 SunMatrix *sun_matrix_multiply(const SunMatrix*a,const SunMatrix*b){
- if(!a||!b||a->cols!=b->rows)return NULL;SunMatrix*o=sun_matrix_create(a->rows,b->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows;i++) {
-  for(size_t j=0;j<b->cols;j++) {
-   for(size_t k=0;k<a->cols;k++) {
-    o->data[i*o->cols+j]+=a->data[i*a->cols+k]*b->data[k*b->cols+j];
+ if(!a||!b||a->cols!=b->rows)return NULL;
+ SunMatrix*o=sun_matrix_create(a->rows,b->cols);if(!o)return NULL;
+ const size_t block=SUN_MATRIX_MATMUL_BLOCK;
+ for(size_t ii=0;ii<a->rows;ii+=block){
+  const size_t i_end=ii+((a->rows-ii)<block?(a->rows-ii):block);
+  for(size_t kk=0;kk<a->cols;kk+=block){
+   const size_t k_end=kk+((a->cols-kk)<block?(a->cols-kk):block);
+   for(size_t jj=0;jj<b->cols;jj+=block){
+    const size_t j_end=jj+((b->cols-jj)<block?(b->cols-jj):block);
+    for(size_t i=ii;i<i_end;i++){
+     double *restrict c_row=o->data+i*o->cols;
+     const double *a_row=a->data+i*a->cols;
+     for(size_t k=kk;k<k_end;k++){
+      const double aik=a_row[k];
+      const double *b_row=b->data+k*b->cols;
+      for(size_t j=jj;j<j_end;j++)c_row[j]+=aik*b_row[j];
+     }
+    }
    }
   }
  }
@@ -91,5 +108,5 @@ SunMatrix *sun_matrix_divide_scalar(const SunMatrix*a,double x){
 void sun_matrix_print(const SunMatrix*m){
  if(!m){puts("<null matrix>");return;}for(size_t r=0;r<m->rows;r++){
  for(size_t c=0;c<m->cols;c++)printf("%g%s",m->data[r*m->cols+c],c+1==m->cols?"":" ");
- putchar('\n');}
+ putchar('\\n');}
 }
