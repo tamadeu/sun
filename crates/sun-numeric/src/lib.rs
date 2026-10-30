@@ -64,6 +64,36 @@ impl SunMatrix {
         Ok(())
     }
 
+    /// Adds matrices using 2D singleton-dimension broadcasting.
+    pub fn broadcast_add(&self, other: &Self) -> Result<Self, MatrixError> {
+        self.broadcast_binary(other, |a, b| a + b)
+    }
+
+    /// Multiplies elements using 2D singleton-dimension broadcasting.
+    pub fn broadcast_elementwise_mul(&self, other: &Self) -> Result<Self, MatrixError> {
+        self.broadcast_binary(other, |a, b| a * b)
+    }
+
+    fn broadcast_binary(&self, other: &Self, f: impl Fn(f64, f64) -> f64) -> Result<Self, MatrixError> {
+        let (ar, ac) = self.shape();
+        let (br, bc) = other.shape();
+        if (ar != br && ar != 1 && br != 1) || (ac != bc && ac != 1 && bc != 1) {
+            return Err(MatrixError::IncompatibleDimensions);
+        }
+        let rows = ar.max(br);
+        let cols = ac.max(bc);
+        let mut values = Vec::with_capacity(rows);
+        for r in 0..rows {
+            let mut row = Vec::with_capacity(cols);
+            for c in 0..cols {
+                row.push(f(self.data[(if ar == 1 { 0 } else { r }, if ac == 1 { 0 } else { c })],
+                           other.data[(if br == 1 { 0 } else { r }, if bc == 1 { 0 } else { c })]));
+            }
+            values.push(row);
+        }
+        Self::from_rows(values)
+    }
+
     pub fn add(&self, other: &Self) -> Result<Self, MatrixError> {
         if self.shape() != other.shape() { return Err(MatrixError::IncompatibleDimensions); }
         Ok(Self { data: &self.data + &other.data })
