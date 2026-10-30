@@ -38,10 +38,18 @@ impl Parser {
             self.advance();
             let value = self.expression(0)?;
             let end = value.span.end;
-            return Ok(Stmt { kind: StmtKind::Assign { name, value }, span: Span::new(start, end) });
+            let suppress_output = matches!(self.peek().kind, TokenKind::Semicolon);
+            if suppress_output { self.advance(); }
+            return Ok(Stmt {
+                kind: StmtKind::Assign { name, value },
+                span: Span::new(start, end),
+                suppress_output,
+            });
         }
         let expr = self.expression(0)?;
-        Ok(Stmt { span: expr.span, kind: StmtKind::Expr(expr) })
+        let suppress_output = matches!(self.peek().kind, TokenKind::Semicolon);
+        if suppress_output { self.advance(); }
+        Ok(Stmt { span: expr.span, kind: StmtKind::Expr(expr), suppress_output })
     }
 
     fn expression(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
@@ -165,6 +173,7 @@ mod tests {
         assert_eq!(module.statements.len(), 1);
         let StmtKind::Assign { name, value } = &module.statements[0].kind else { panic!("expected assignment") };
         assert_eq!(name, "x");
+        assert!(module.statements[0].suppress_output);
         let ExprKind::Binary { op: BinaryOp::Add, right, .. } = &value.kind else { panic!("expected addition at root") };
         assert!(matches!(&right.kind, ExprKind::Binary { op: BinaryOp::Multiply, .. }));
     }
