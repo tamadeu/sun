@@ -38,3 +38,7 @@ clang -O3 -std=c11 -Wall -Wextra benchmarks/elementwise_kernels.c -lm -o element
 ```
 
 It checks correctness and compares a scalar reference loop with the runtime operation for tiny, irregular, tile-boundary, and larger matrix shapes. Timings include allocation/free on both paths and are intended as same-machine comparative measurements only. The reported ratio is scalar-loop time divided by runtime-kernel time; values above 1 indicate the runtime path was faster in that particular run. The CI invocation is a correctness/build smoke test, not a performance claim.
+
+## Runtime SIMD dispatch
+
+The elementwise runtime kernels use runtime CPU feature detection on x86. They select AVX-512F when available, otherwise AVX2, and otherwise the portable scalar implementation. Architecture-specific functions use compiler target attributes, so the rest of the runtime is compiled for the baseline target and does not require global AVX compiler flags. Non-x86 platforms always use the portable implementation. The elementwise benchmark validates numerical results for all four operations and a range of matrix shapes; its timings are diagnostic only and do not guarantee that a wider ISA is faster on every workload.
