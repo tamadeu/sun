@@ -25,11 +25,8 @@ impl std::fmt::Display for Value {
                     if ri > 0 { write!(f, "; ")?; }
                     for (ci, value) in row.iter().enumerate() {
                         if ci > 0 { write!(f, ", ")?; }
-                        if value.fract() == 0.0 && value.abs() < 1e15 {
-                            write!(f, "{value:.0}")?;
-                        } else {
-                            write!(f, "{value}")?;
-                        }
+                        if value.fract() == 0.0 && value.abs() < 1e15 { write!(f, "{value:.0}")?; }
+                        else { write!(f, "{value}")?; }
                     }
                 }
                 write!(f, "]")
@@ -59,11 +56,11 @@ pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
             StmtKind::Assign { name, value } => {
                 let result = eval(value, &mut env, &mut output)?;
                 env.insert(name.clone(), result.clone());
-                output.push(format!("{name} = {result}"));
+                if !statement.suppress_output { output.push(format!("{name} = {result}")); }
             }
             StmtKind::Expr(expr) => {
                 let result = eval(expr, &mut env, &mut output)?;
-                if result != Value::Void { output.push(result.to_string()); }
+                if !statement.suppress_output && result != Value::Void { output.push(result.to_string()); }
             }
         }
     }
@@ -135,15 +132,9 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
             ElementMultiply => Ok(Value::Matrix(a.elementwise_mul(&b)?)),
             _ => Err(RuntimeError::Unsupported(format!("matrix operator {op:?}"))),
         },
-        (Value::Matrix(a), Value::Number(b)) if matches!(op, Multiply | ElementMultiply) => {
-            Ok(Value::Matrix(matrix_map(&a, |x| x * b)?))
-        }
-        (Value::Number(a), Value::Matrix(b)) if matches!(op, Multiply | ElementMultiply) => {
-            Ok(Value::Matrix(matrix_map(&b, |x| x * a)?))
-        }
-        (Value::Matrix(a), Value::Number(b)) if matches!(op, Divide | ElementDivide) => {
-            Ok(Value::Matrix(matrix_map(&a, |x| x / b)?))
-        }
+        (Value::Matrix(a), Value::Number(b)) if matches!(op, Multiply | ElementMultiply) => Ok(Value::Matrix(matrix_map(&a, |x| x * b)?)),
+        (Value::Number(a), Value::Matrix(b)) if matches!(op, Multiply | ElementMultiply) => Ok(Value::Matrix(matrix_map(&b, |x| x * a)?)),
+        (Value::Matrix(a), Value::Number(b)) if matches!(op, Divide | ElementDivide) => Ok(Value::Matrix(matrix_map(&a, |x| x / b)?)),
         (a, b) => Err(RuntimeError::Unsupported(format!("operator {op:?} on {a} and {b}"))),
     }
 }
@@ -168,7 +159,7 @@ fn call(name: &str, args: Vec<Value>, output: &mut Vec<String>) -> Result<Value,
         ("abs", Value::Number(n)) => Ok(Value::Number(n.abs())),
         ("exp", Value::Number(n)) => Ok(Value::Number(n.exp())),
         ("log", Value::Number(n)) => Ok(Value::Number(n.ln())),
-        ("sum", Value::Matrix(m)) => Ok(Value::Number(m.to_rows().iter().flatten().sum())),
+        ("sum", Value::Matrix(m)) => Ok(Value::Number(m.to_rows().iter().flatten().copied().sum())),
         ("sum", Value::Number(n)) => Ok(Value::Number(n)),
         (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum") =>
             Err(RuntimeError::Unsupported(format!("unknown function '{unknown}'"))),
@@ -182,17 +173,23 @@ mod tests {
 
     #[test]
     fn evaluates_precedence_and_functions() {
-        let module = sun_parser::parse("x = 2 + 3 * 4; y = sqrt(x);").unwrap();
+        let module = sun_parser::parse("x = 2 + 3 * 4\ny = sqrt(x)").unwrap();
         let result = execute(&module).unwrap();
         assert_eq!(result, vec!["x = 14", "y = 3.7416573867739413"]);
     }
 
     #[test]
     fn evaluates_matrix_multiplication_and_elementwise_multiplication() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4]; B = A * A; C = A .* A;").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4]\nB = A * A\nC = A .* A").unwrap();
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "B = [7, 10; 15, 22]");
         assert_eq!(result[2], "C = [1, 4; 9, 16]");
+    }
+
+    #[test]
+    fn suppresses_implicit_output_with_semicolon() {
+        let module = sun_parser::parse("x = 42;\ndisp(x);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["42"]);
     }
 
     #[test]
