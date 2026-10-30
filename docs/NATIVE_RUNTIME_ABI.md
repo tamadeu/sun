@@ -1,0 +1,13 @@
+# Sun native runtime matrix ABI
+The C runtime exposes an opaque heap-backed `SunMatrix`. Consumers must not depend on its layout. Use `sun_matrix_create` / `sun_matrix_free` and the access/operation functions below.
+
+- `sun_matrix_create(rows, cols)`, `sun_matrix_free(matrix)`
+- `sun_matrix_rows(matrix)`, `sun_matrix_cols(matrix)`
+- `sun_matrix_get(matrix, row, col, &status)`, `sun_matrix_set(matrix, row, col, value)`
+- `sun_matrix_add(a, b)`, `sun_matrix_element_multiply(a, b)`, `sun_matrix_multiply(a, b)`
+- `sun_matrix_scale(matrix, scalar)`, `sun_matrix_divide_scalar(matrix, scalar)`
+- `sun_matrix_print(matrix)`
+
+Indices at the ABI boundary are 1-based. Accessors return status codes for null and out-of-range access. Constructors and operations return an owned matrix or NULL for invalid shapes, division by zero, or allocation failure. The caller owns every returned matrix.
+
+The LLVM generator has not yet migrated to this ABI; that integration is a separate next step. The C interface is independently compiled and exercised in CI.
