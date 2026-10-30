@@ -6,7 +6,12 @@ use sun_source::Span;
 pub struct Module { pub statements: Vec<Stmt> }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Stmt { pub kind: StmtKind, pub span: Span }
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+    /// Whether a trailing semicolon suppresses the statement's implicit result.
+    pub suppress_output: bool,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
