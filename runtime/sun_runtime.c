@@ -36,8 +36,14 @@ SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
 }
 SunMatrix *sun_matrix_multiply(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->cols!=b->rows)return NULL;SunMatrix*o=sun_matrix_create(a->rows,b->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows;i++)for(size_t j=0;j<b->cols;j++)for(size_t k=0;k<a->cols;k++)
- o->data[i*o->cols+j]+=a->data[i*a->cols+k]*b->data[k*b->cols+j];return o;
+ for(size_t i=0;i<a->rows;i++) {
+  for(size_t j=0;j<b->cols;j++) {
+   for(size_t k=0;k<a->cols;k++) {
+    o->data[i*o->cols+j]+=a->data[i*a->cols+k]*b->data[k*b->cols+j];
+   }
+  }
+ }
+ return o;
 }
 SunMatrix *sun_matrix_scale(const SunMatrix*a,double x){
  if(!a)return NULL;SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
