@@ -6,6 +6,7 @@ typedef struct SunMatrix SunMatrix;
 SunMatrix *sun_matrix_create(size_t,size_t);void sun_matrix_free(SunMatrix*);
 size_t sun_matrix_rows(const SunMatrix*);size_t sun_matrix_cols(const SunMatrix*);
 int sun_matrix_set(SunMatrix*,size_t,size_t,double);
+void sun_matrix_set_indexed(SunMatrix*,double,double,double);
 double sun_matrix_get(const SunMatrix*,size_t,size_t,int*);
 SunMatrix *sun_matrix_add(const SunMatrix*,const SunMatrix*);
 SunMatrix *sun_matrix_element_multiply(const SunMatrix*,const SunMatrix*);
@@ -17,6 +18,7 @@ int main(void){
  assert(sun_matrix_rows(a)==2&&sun_matrix_cols(a)==3);
  for(size_t r=1;r<=2;r++)for(size_t c=1;c<=3;c++){assert(!sun_matrix_set(a,r,c,(r-1)*3+c));assert(!sun_matrix_set(b,r,c,1));}
  int st=-1;assert(fabs(sun_matrix_get(a,2,3,&st)-6)<1e-12&&st==0);
+ sun_matrix_set_indexed(a,2.0,3.0,42.0);assert(fabs(sun_matrix_get(a,2,3,&st)-42.0)<1e-12&&st==0);
  (void)sun_matrix_get(a,0,1,&st);assert(st==2);
  SunMatrix*s=sun_matrix_add(a,b),*h=sun_matrix_element_multiply(a,b),*d=sun_matrix_scale(a,2),*q=sun_matrix_divide_scalar(a,2);
  assert(s&&h&&d&&q);assert(fabs(sun_matrix_get(s,2,3,&st)-7)<1e-12);
