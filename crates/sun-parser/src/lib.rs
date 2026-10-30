@@ -207,9 +207,9 @@ mod tests {
         let module = parse("A(2, 3) = 10;").unwrap();
         let StmtKind::IndexAssign { name, row, col, value } = &module.statements[0].kind else { panic!("expected indexed assignment") };
         assert_eq!(name, "A");
-        assert!(matches!(row.kind, ExprKind::Number(2.0)));
-        assert!(matches!(col.kind, ExprKind::Number(3.0)));
-        assert!(matches!(value.kind, ExprKind::Number(10.0)));
+        assert!(matches!(&row.kind, ExprKind::Number(n) if *n == 2.0));
+        assert!(matches!(&col.kind, ExprKind::Number(n) if *n == 3.0));
+        assert!(matches!(&value.kind, ExprKind::Number(n) if *n == 10.0));
     }
 
     #[test]
