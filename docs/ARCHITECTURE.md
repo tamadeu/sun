@@ -18,7 +18,7 @@ Native scalar math calls cross a C ABI bundled into each executable (`runtime/su
 - Dense f64 matrices for the first release.
 - Public matrix indexing is 1-based.
 - LLVM is the native backend; the CLI invokes Clang 18+ to compile generated LLVM IR.
-- The interpreter supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, 1-based matrix reads via `A(row, column)`, and basic math functions.
+- The interpreter supports numeric expressions, variables, matrix literals, matrix addition and element-wise multiplication with 2D singleton-dimension broadcasting, matrix multiplication, scalar multiplication/division, 1-based matrix reads via `A(row, column)`, and basic math functions.
 - The LLVM backend supports scalar arithmetic, fixed-shape dense matrix literals/operations, matrix display, compile-time literal 1-based matrix reads, and native math calls through the C runtime ABI.
 - A trailing semicolon suppresses the implicit result; `disp(...)` still writes output.
 - MATLAB-style comments begin with %.
