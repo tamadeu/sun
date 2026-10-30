@@ -1,0 +1,41 @@
+disp("Selecao numerica:");
+operacao = 2;
+switch operacao
+    case 1
+        disp("Soma");
+    case 2
+        disp("Multiplicacao");
+    otherwise
+        disp("Operacao desconhecida");
+end
+
+disp("Selecao por texto:");
+modo = "resfriamento";
+switch modo
+    case "aquecimento"
+        disp("Aquecimento ativado");
+    case "resfriamento"
+        disp("Resfriamento ativado");
+    otherwise
+        disp("Modo desconhecido");
+end
+
+disp("Caso padrao:");
+switch 99
+    case 1
+        disp("Opcao 1");
+    otherwise
+        disp("Opcao desconhecida");
+end
+
+disp("Switch dentro de loop:");
+for etapa = 1:5
+    switch etapa
+        case 2
+            continue;
+        case 4
+            break;
+        otherwise
+            disp(etapa);
+    end
+end

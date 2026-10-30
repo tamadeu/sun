@@ -1,0 +1,16 @@
+disp("Busca por valor acima do limite:");
+limite = 50;
+medicoes = [10, 20, 30; 40, 60, 80];
+
+for coluna = medicoes
+    for linha = 1:2
+        valor = coluna(linha, 1);
+        if valor > limite
+            disp("Primeiro valor encontrado:");
+            disp(valor);
+            return;
+        end
+    end
+end
+
+disp("Nenhum valor acima do limite foi encontrado.");

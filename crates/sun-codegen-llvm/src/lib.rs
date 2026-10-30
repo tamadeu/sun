@@ -27,7 +27,11 @@ impl Generator {
     fn expression(&mut self,expr:&Expr)->Result<NativeValue,BackendError>{
         match &expr.kind {
             ExprKind::Number(n)=>Ok(NativeValue::Scalar(format!("{:.17e}",n))),
+            ExprKind::IndexEnd=>Err(BackendError::Unsupported("end in matrix indices is only available in the interpreter; use sun run".into())),
+            ExprKind::IndexAll|ExprKind::IndexRange{..}=>Err(BackendError::Unsupported("matrix slices are only available in the interpreter; use sun run".into())),
+            ExprKind::Identifier(name) if name=="pause"&&!self.variables.contains_key(name)=>Err(BackendError::Unsupported("pause is only available in the interpreter; use sun run".into())),
             ExprKind::Identifier(name)=>self.variables.get(name).cloned().ok_or_else(||BackendError::UndefinedVariable(name.clone())),
+            ExprKind::FieldAccess{..}=>Err(BackendError::Unsupported("exception field access is only available in the interpreter; use sun run".into())),
             ExprKind::Unary{op,operand}=>{
                 let value=self.scalar(operand)?;
                 match op{
@@ -56,6 +60,9 @@ impl Generator {
             }
             ExprKind::Call{callee,arguments}=>{
                 let ExprKind::Identifier(name)=&callee.kind else{return Err(BackendError::Unsupported("indirect calls".into()));};
+                if matches!(name.as_str(),"error"|"rethrow"|"pause"){
+                    return Err(BackendError::Unsupported(format!("{name} is only available in the interpreter; use sun run")));
+                }
                 if name=="disp"{
                     if arguments.len()!=1{return Err(BackendError::Unsupported("disp expects one argument".into()));}
                     let v=self.expression(&arguments[0])?;self.print(&v);return Ok(NativeValue::Scalar("0.0".into()));
@@ -73,6 +80,7 @@ impl Generator {
                     return Ok(NativeValue::Scalar(result));
                 }
                 if let Some(NativeValue::Matrix{pointer,rows,cols})=self.variables.get(name).cloned(){
+                    if arguments.len()==1{return Err(BackendError::Unsupported("linear matrix indexing is only available in the interpreter; use sun run".into()));}
                     if arguments.len()!=2{return Err(BackendError::Unsupported("matrix indexing uses A(row, column)".into()));}
                     // Keep literal coordinates compile-time checked; evaluate all other
                     // index expressions at runtime and let the ABI validate their values.
@@ -153,6 +161,14 @@ impl Generator {
 pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
     let mut g=Generator::default();
     for stmt in &module.statements{match &stmt.kind{
+        StmtKind::For{..}|StmtKind::ForEach{..}=>return Err(BackendError::Unsupported("for loops are only available in the interpreter; use sun run".into())),
+        StmtKind::While{..}=>return Err(BackendError::Unsupported("while loops are only available in the interpreter; use sun run".into())),
+        StmtKind::If{..}=>return Err(BackendError::Unsupported("if statements are only available in the interpreter; use sun run".into())),
+        StmtKind::Switch{..}=>return Err(BackendError::Unsupported("switch statements are only available in the interpreter; use sun run".into())),
+        StmtKind::Return=>return Err(BackendError::Unsupported("return statements are only available in the interpreter; use sun run".into())),
+        StmtKind::Try{..}=>return Err(BackendError::Unsupported("try/catch statements are only available in the interpreter; use sun run".into())),
+        StmtKind::LinearIndexAssign{..}=>return Err(BackendError::Unsupported("linear matrix indexing is only available in the interpreter; use sun run".into())),
+        StmtKind::Break|StmtKind::Continue=>return Err(BackendError::Unsupported("loop control statements are only available in the interpreter; use sun run".into())),
         StmtKind::Assign{name,value}=>{let v=g.expression(value)?;g.variables.insert(name.clone(),v);}
         StmtKind::IndexAssign{name,row,col,value}=>{
             let Some(NativeValue::Matrix{pointer,rows,cols})=g.variables.get(name).cloned() else {
@@ -176,6 +192,19 @@ pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
 #[cfg(test)]
 mod tests{
  use super::*;use sun_parser::parse;
+ #[test]fn rejects_matrix_slices_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(:,1));","A=[1,2;3,4]; disp(A(1:end,:));"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("matrix slices"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_linear_indexing_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(2));","A=[1,2;3,4]; disp(A(end));","A=[1,2;3,4]; A(end)=7;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("linear matrix indexing"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_index_end_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(end,1));","A=[1,2;3,4]; A(1,end)=7;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("end in matrix indices"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_pause_with_interpreter_guidance(){for source in ["pause(0);","pause();","pause;","pause(\"query\");"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("pause"));assert!(error.contains("sun run"));}}
+ #[test]fn compiles_variable_named_pause(){let ast=parse("pause=7; disp(pause);").unwrap();assert!(compile_to_llvm_ir(&ast).is_ok());}
+ #[test]fn rejects_exception_features_with_interpreter_guidance(){for source in ["try; catch failure; disp(failure.message); end","disp(failure.identifier);","error(\"failure\");","rethrow(failure);"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("interpreter"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_try_catch_with_interpreter_guidance(){let ast=parse("try; catch; end").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("try/catch statements"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_return_with_interpreter_guidance(){let ast=parse("return;").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("return statements"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_switch_with_interpreter_guidance(){let ast=parse("switch 1; case 1; otherwise; end").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("switch statements"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_for_with_interpreter_guidance(){for source in ["for index = 1:3; end","for column = [1,2;3,4]; end","for value = 7; end"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("for loops"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_if_with_interpreter_guidance(){let ast=parse("if 0; elseif 1; else; end").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("if statements"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_loop_control_in_direct_ast(){for keyword in ["break","continue"]{let mut ast=parse(&format!("while 1; {keyword}; end")).unwrap();let StmtKind::While{body,..}=ast.statements.remove(0).kind else{panic!("expected while")};let error=compile_to_llvm_ir(&Module{statements:body}).unwrap_err().to_string();assert!(error.contains("loop control statements"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_while_with_interpreter_guidance(){let ast=parse("while 0\nend").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("while loops"));assert!(error.contains("sun run"));}
  #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));assert!(ir.contains("call void @sun_runtime_check_matrix"));
  assert!(ir.contains("call void @sun_runtime_cleanup"));}
  #[test]fn matrix_aliases_and_reassignments_use_single_runtime_cleanup(){let ast=parse("A=[1,2;3,4]; B=A; A=A*A; disp(B); disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert_eq!(ir.matches("call void @sun_runtime_cleanup()").count(),1);assert!(ir.matches("call void @sun_runtime_check_matrix").count()>=2);}

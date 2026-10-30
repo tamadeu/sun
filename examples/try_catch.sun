@@ -1,0 +1,26 @@
+disp("Tentativa de inversao:");
+A = [1, 2; 2, 4];
+try
+    inversa = inv(A);
+catch
+    disp("Matriz singular: usando identidade.");
+    inversa = [1, 0; 0, 1];
+end
+disp(inversa);
+
+disp("Processamento por coluna:");
+for coluna = [1, 2, 3; 10, 20, 30]
+    try
+        indice = coluna(1, 1);
+        if indice == 2
+            valor = coluna(3, 1);
+        else
+            valor = sum(coluna);
+        end
+    catch
+        disp("Coluna ignorada por erro de indice.");
+        continue;
+    end
+    disp(valor);
+end
+disp("Execucao concluida.");

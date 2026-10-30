@@ -17,6 +17,16 @@ pub struct Stmt {
 pub enum StmtKind {
     Assign { name: String, value: Expr },
     IndexAssign { name: String, row: Expr, col: Expr, value: Expr },
+    LinearIndexAssign { name: String, index: Expr, value: Expr },
+    While { condition: Expr, body: Vec<Stmt> },
+    For { name: String, start: Expr, step: Option<Expr>, stop: Expr, body: Vec<Stmt> },
+    ForEach { name: String, source: Expr, body: Vec<Stmt> },
+    If { branches: Vec<(Expr, Vec<Stmt>)>, else_body: Vec<Stmt> },
+    Switch { selector: Expr, cases: Vec<(Expr, Vec<Stmt>)>, otherwise_body: Vec<Stmt> },
+    Try { body: Vec<Stmt>, catch_name: Option<String>, catch_body: Vec<Stmt> },
+    Break,
+    Continue,
+    Return,
     Expr(Expr),
 }
 
@@ -28,6 +38,10 @@ pub enum ExprKind {
     Number(f64),
     String(String),
     Identifier(String),
+    IndexEnd,
+    IndexAll,
+    IndexRange { start: Box<Expr>, step: Option<Box<Expr>>, stop: Box<Expr> },
+    FieldAccess { object: Box<Expr>, field: String },
     Matrix(Vec<Vec<Expr>>),
     Unary { op: UnaryOp, operand: Box<Expr> },
     Binary { left: Box<Expr>, op: BinaryOp, right: Box<Expr> },

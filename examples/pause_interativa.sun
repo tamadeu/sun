@@ -1,0 +1,16 @@
+disp("Estado inicial:");
+disp(pause("query"));
+
+anterior = pause("off");
+disp("Pausas desativadas:");
+pause(60);
+pause();
+pause;
+disp(pause("query"));
+
+pause(anterior);
+disp("Pressione uma tecla para continuar.");
+pause();
+disp("Pressione outra tecla para concluir.");
+pause;
+disp("Execucao concluida.");

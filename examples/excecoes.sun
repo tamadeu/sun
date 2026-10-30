@@ -1,0 +1,37 @@
+disp("Erro numerico identificado:");
+try
+    inversa = inv([1, 2; 2, 4]);
+catch erro
+    disp(erro.identifier);
+    disp(erro.message);
+end
+
+disp("Erro de validacao:");
+pressao = 120;
+limite = 100;
+try
+    if pressao > limite
+        error("Industria:PressaoAlta", "Pressao acima do limite.");
+    end
+catch erro
+    switch erro.identifier
+        case "Industria:PressaoAlta"
+            disp(erro.message);
+        otherwise
+            rethrow(erro);
+    end
+end
+
+disp("Repasse de excecao:");
+try
+    try
+        error("Industria:SensorInvalido", "Leitura do sensor invalida.");
+    catch interno
+        disp("Registrando erro antes do repasse.");
+        rethrow(interno);
+    end
+catch externo
+    disp(externo.identifier);
+    disp(externo.message);
+end
+disp("Execucao concluida.");

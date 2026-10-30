@@ -1,18 +1,85 @@
 use clap::{Parser as ClapParser, Subcommand};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled},
+};
 use std::{
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
 };
 use sun_lexer::lex;
 use sun_parser::parse;
-use sun_runtime::execute;
+use sun_runtime::{execute, execute_with_host, RuntimeHost};
 use sun_codegen_llvm::compile_to_llvm_ir;
 
 #[derive(Debug, ClapParser)]
 #[command(name = "sun", version, about = "Sun — scientific programming for everyone")]
 struct Cli { #[command(subcommand)] command: Option<Command> }
+
+struct ConsoleHost<Writer: Write> { writer: Writer }
+
+impl<Writer: Write> RuntimeHost for ConsoleHost<Writer> {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        writeln!(self.writer, "{line}")?;
+        self.writer.flush()
+    }
+
+    fn wait_for_input(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        let stdin = io::stdin();
+        if stdin.is_terminal() { wait_for_terminal_key() }
+        else { wait_for_input_line(&mut stdin.lock()) }
+    }
+}
+
+struct RawModeGuard { restore: bool }
+
+impl RawModeGuard {
+    fn new() -> io::Result<Self> {
+        let already_enabled = is_raw_mode_enabled()?;
+        if !already_enabled { enable_raw_mode()?; }
+        Ok(Self { restore: !already_enabled })
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restore {
+            disable_raw_mode()?;
+            self.restore = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) { let _ = self.restore(); }
+}
+
+fn pause_key_result(event: Event) -> Option<io::Result<()>> {
+    let Event::Key(key) = event else { return None; };
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) { return None; }
+    if matches!(key.code, KeyCode::Char('c' | 'C')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        Some(Err(io::Error::new(io::ErrorKind::Interrupted, "interactive pause interrupted")))
+    } else { Some(Ok(())) }
+}
+
+fn wait_for_terminal_key() -> io::Result<()> {
+    let mut guard = RawModeGuard::new()?;
+    let result = loop {
+        if let Some(result) = pause_key_result(event::read()?) { break result; }
+    };
+    guard.restore()?;
+    result
+}
+
+fn wait_for_input_line(input: &mut impl BufRead) -> io::Result<()> {
+    let mut line = Vec::new();
+    if input.read_until(b'\n', &mut line)? == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "interactive pause reached end of input"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -30,6 +97,70 @@ enum Command {
     Compile { file: PathBuf, #[arg(short, long)] output: Option<PathBuf> },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    #[test]
+    fn pause_accepts_keys_but_ignores_releases_and_non_key_events() {
+        for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Left] {
+            assert!(pause_key_result(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))).unwrap().is_ok());
+        }
+        assert!(pause_key_result(Event::Resize(80, 24)).is_none());
+        let release = KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Release);
+        assert!(pause_key_result(Event::Key(release)).is_none());
+    }
+
+    #[test]
+    fn pause_ctrl_c_reports_interruption() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(pause_key_result(event).unwrap().unwrap_err().kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn piped_pause_consumes_one_line_and_reports_eof() {
+        let mut input = io::Cursor::new(b"\ncontinue\n");
+        wait_for_input_line(&mut input).unwrap();
+        assert_eq!(input.position(), 1);
+        wait_for_input_line(&mut input).unwrap();
+        assert_eq!(wait_for_input_line(&mut input).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[derive(Default)]
+    struct TrackingWriter { bytes: Vec<u8>, flushes: usize }
+
+    impl Write for TrackingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn console_host_flushes_each_output_line() {
+        let module = parse("value = 1\npause(0); disp(value);").unwrap();
+        let mut host = ConsoleHost { writer: TrackingWriter::default() };
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.writer.bytes, b"value = 1\n1\n");
+        assert_eq!(host.writer.flushes, 2);
+    }
+
+    #[test]
+    fn console_host_keeps_output_before_uncaught_error() {
+        let module = parse("disp(1); error(\"stop\"); disp(2);").unwrap();
+        let mut host = ConsoleHost { writer: TrackingWriter::default() };
+        assert!(execute_with_host(&module, &mut host).is_err());
+        assert_eq!(host.writer.bytes, b"1\n");
+        assert_eq!(host.writer.flushes, 1);
+    }
+}
+
 fn main() {
     if let Err(error) = run(Cli::parse()) {
         eprintln!("sun: {error}");
@@ -42,7 +173,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Run { file }) => {
             let source = fs::read_to_string(&file)?;
             let module = parse(&source)?;
-            for line in execute(&module)? { println!("{line}"); }
+            let stdout = io::stdout();
+            let mut host = ConsoleHost { writer: stdout.lock() };
+            execute_with_host(&module, &mut host)?;
         }
         Some(Command::Check { file }) => {
             let source = fs::read_to_string(&file)?;

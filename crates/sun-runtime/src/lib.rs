@@ -1,7 +1,7 @@
 //! Initial interpreter/runtime for Sun 0.1.
 
-use std::collections::HashMap;
-use sun_ast::{BinaryOp, Expr, ExprKind, Module, StmtKind, UnaryOp};
+use std::{collections::HashMap, io, time::Duration};
+use sun_ast::{BinaryOp, Expr, ExprKind, Module, Stmt, StmtKind, UnaryOp};
 use sun_numeric::{MatrixError, SunMatrix};
 use thiserror::Error;
 
@@ -10,7 +10,15 @@ pub enum Value {
     Number(f64),
     String(String),
     Matrix(SunMatrix),
+    Exception(SunException),
     Void,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("{identifier}: {message}")]
+pub struct SunException {
+    pub identifier: String,
+    pub message: String,
 }
 
 impl std::fmt::Display for Value {
@@ -31,6 +39,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Self::Exception(exception) => write!(f, "{exception}"),
             Self::Void => Ok(()),
         }
     }
@@ -44,24 +53,204 @@ pub enum RuntimeError {
     Unsupported(String),
     #[error("function '{0}' expects {1}")]
     Arity(String, String),
+    #[error("invalid for range: {0}")]
+    InvalidForRange(String),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+    #[error(transparent)]
+    Exception(#[from] SunException),
+    #[error("runtime I/O error: {0}")]
+    Io(#[from] io::Error),
     #[error(transparent)]
     Matrix(#[from] MatrixError),
 }
 
+impl RuntimeError {
+    pub fn identifier(&self) -> &str {
+        match self {
+            Self::UndefinedVariable(_) => "Sun:UndefinedVariable",
+            Self::Unsupported(_) => "Sun:UnsupportedOperation",
+            Self::Arity(_, _) => "Sun:InvalidArgumentCount",
+            Self::InvalidForRange(_) => "Sun:InvalidForRange",
+            Self::InvalidArgument(_) => "Sun:InvalidArgument",
+            Self::Io(_) => "Sun:IOError",
+            Self::Exception(exception) => &exception.identifier,
+            Self::Matrix(error) => match error {
+                MatrixError::Empty => "Sun:EmptyMatrix",
+                MatrixError::RaggedRows => "Sun:RaggedMatrixRows",
+                MatrixError::IndexOutOfBounds { .. } | MatrixError::LinearIndexOutOfBounds { .. } => "Sun:IndexOutOfBounds",
+                MatrixError::IncompatibleDimensions => "Sun:IncompatibleDimensions",
+                MatrixError::SingularMatrix => "Sun:SingularMatrix",
+            },
+        }
+    }
+
+    pub fn to_exception(&self) -> SunException {
+        match self {
+            Self::Exception(exception) => exception.clone(),
+            _ => SunException { identifier: self.identifier().into(), message: self.to_string() },
+        }
+    }
+}
+
+pub trait RuntimeHost {
+    fn write_line(&mut self, line: &str) -> io::Result<()>;
+
+    fn pause(&mut self, duration: Duration) -> io::Result<()> {
+        if !duration.is_zero() { std::thread::sleep(duration); }
+        Ok(())
+    }
+
+    fn wait_for_input(&mut self) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "interactive pause requires a host with input support"))
+    }
+}
+
+struct ExecutionContext<'a> {
+    host: &'a mut dyn RuntimeHost,
+    pause_enabled: bool,
+    index_end: Option<usize>,
+}
+
+impl ExecutionContext<'_> {
+    fn write_line(&mut self, line: &str) -> io::Result<()> { self.host.write_line(line) }
+
+    fn pause(&mut self, duration: Duration) -> io::Result<()> {
+        if self.pause_enabled { self.host.pause(duration) } else { Ok(()) }
+    }
+
+    fn wait_for_input(&mut self) -> io::Result<()> {
+        if self.pause_enabled { self.host.wait_for_input() } else { Ok(()) }
+    }
+}
+
+struct CollectingHost { lines: Vec<String> }
+
+impl RuntimeHost for CollectingHost {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        self.lines.push(line.to_string());
+        Ok(())
+    }
+}
+
 pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
+    let mut host = CollectingHost { lines: Vec::new() };
+    execute_with_host(module, &mut host)?;
+    Ok(host.lines)
+}
+
+pub fn execute_with_host(module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
     let mut env = HashMap::<String, Value>::new();
-    let mut output = Vec::new();
-    for statement in &module.statements {
+    let mut context = ExecutionContext { host, pause_enabled: true, index_end: None };
+    match execute_statements(&module.statements, &mut env, &mut context)? {
+        ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
+        ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
+        ExecutionFlow::Continue => Err(RuntimeError::Unsupported("continue is only valid inside a loop".into())),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionFlow { Normal, Break, Continue, Return }
+
+struct NumericRange {
+    start: f64,
+    step: f64,
+    stop: f64,
+    length: u64,
+    includes_stop: bool,
+}
+
+impl NumericRange {
+    fn new(start: f64, step: f64, stop: f64) -> Result<Self, RuntimeError> {
+        if !start.is_finite() || !step.is_finite() || !stop.is_finite() {
+            return Err(RuntimeError::InvalidForRange("start, step and stop must be finite".into()));
+        }
+        if step == 0.0 { return Err(RuntimeError::InvalidForRange("step must not be zero".into())); }
+        if (step > 0.0 && start > stop) || (step < 0.0 && start < stop) {
+            return Ok(Self { start, step, stop, length: 0, includes_stop: false });
+        }
+        let distance = stop - start;
+        let quotient = if distance.is_finite() { distance / step } else { stop / step - start / step };
+        if !quotient.is_finite() || quotient >= (1_u64 << 53) as f64 {
+            return Err(RuntimeError::InvalidForRange("too many iterations for exact f64 iteration indices".into()));
+        }
+        let nearest = quotient.round();
+        let tolerance = (4.0 * f64::EPSILON * quotient.abs().max(1.0)).min(0.25);
+        let includes_stop = (nearest >= 1.0 && (quotient - nearest).abs() <= tolerance) || start == stop;
+        let last_index = if includes_stop { nearest } else { quotient.floor() };
+        let range = Self { start, step, stop, length: last_index as u64 + 1, includes_stop };
+        if range.length > 1 && range.value_at(1) == start {
+            return Err(RuntimeError::InvalidForRange("step is too small to advance at this magnitude".into()));
+        }
+        Ok(range)
+    }
+
+    fn value_at(&self, index: u64) -> f64 {
+        if index == 0 { self.start }
+        else if index + 1 == self.length && self.includes_stop { self.stop }
+        else { self.step.mul_add(index as f64, self.start) }
+    }
+}
+
+fn for_scalar(value: Value) -> Result<f64, RuntimeError> {
+    match value {
+        Value::Number(number) => Ok(number),
+        other => Err(RuntimeError::InvalidForRange(format!("bounds must be scalar numbers, got {other}"))),
+    }
+}
+
+fn scalar_condition(value: Value, context: &str) -> Result<bool, RuntimeError> {
+    match value {
+        Value::Number(number) if number.is_finite() => Ok(number != 0.0),
+        other => Err(RuntimeError::Unsupported(format!("{context} condition must be a finite scalar number, got {other}"))),
+    }
+}
+
+fn switch_value(value: Value, context: &str) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Number(_) | Value::String(_) => Ok(value),
+        other => Err(RuntimeError::Unsupported(format!("switch {context} must be a number or string, got {other}"))),
+    }
+}
+
+fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<ExecutionFlow, RuntimeError> {
+    for statement in statements {
         match &statement.kind {
             StmtKind::Assign { name, value } => {
-                let result = eval(value, &mut env, &mut output)?;
+                let result = eval(value, env, output)?;
                 env.insert(name.clone(), result.clone());
-                if !statement.suppress_output { output.push(format!("{name} = {result}")); }
+                if !statement.suppress_output { output.write_line(&format!("{name} = {result}"))?; }
+            }
+            StmtKind::LinearIndexAssign { name, index, value } => {
+                let elements = match env.get(name) {
+                    Some(Value::Matrix(matrix)) => matrix.element_count(),
+                    Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                    None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                };
+                if is_slice_index(index) { return Err(RuntimeError::Unsupported("slice assignment is not supported yet".into())); }
+                let index = eval_index(index, env, output, "linear", elements)?;
+                let value = match eval(value, env, output)? {
+                    Value::Number(number) => number,
+                    other => return Err(RuntimeError::Unsupported(format!("matrix assignment value must be a number, got {other}"))),
+                };
+                match env.get_mut(name) {
+                    Some(Value::Matrix(matrix)) => matrix.set_linear(index, value)?,
+                    Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                    None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                }
             }
             StmtKind::IndexAssign { name, row, col, value } => {
-                let row = eval_index(row, &mut env, &mut output, "row")?;
-                let col = eval_index(col, &mut env, &mut output, "column")?;
-                let value = match eval(value, &mut env, &mut output)? {
+                let (rows, cols) = match env.get(name) {
+                    Some(Value::Matrix(matrix)) => matrix.shape(),
+                    Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                    None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                };
+                if is_slice_index(row) || is_slice_index(col) {
+                    return Err(RuntimeError::Unsupported("slice assignment is not supported yet".into()));
+                }
+                let row = eval_index(row, env, output, "row", rows)?;
+                let col = eval_index(col, env, output, "column", cols)?;
+                let value = match eval(value, env, output)? {
                     Value::Number(number) => number,
                     other => return Err(RuntimeError::Unsupported(format!("matrix assignment value must be a number, got {other}"))),
                 };
@@ -71,27 +260,212 @@ pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 }
             }
+            StmtKind::For { name, start, step, stop, body } => {
+                let start = for_scalar(eval(start, env, output)?)?;
+                let step = match step {
+                    Some(step) => for_scalar(eval(step, env, output)?)?,
+                    None => 1.0,
+                };
+                let stop = for_scalar(eval(stop, env, output)?)?;
+                let range = NumericRange::new(start, step, stop)?;
+                let mut previous = None;
+                for index in 0..range.length {
+                    let value = range.value_at(index);
+                    if !value.is_finite() || previous == Some(value) {
+                        return Err(RuntimeError::InvalidForRange("step cannot produce distinct finite iteration values".into()));
+                    }
+                    previous = Some(value);
+                    env.insert(name.clone(), Value::Number(value));
+                    match execute_statements(body, env, output)? {
+                        ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
+                        ExecutionFlow::Break => break,
+                        ExecutionFlow::Normal | ExecutionFlow::Continue => {}
+                    }
+                }
+            }
+            StmtKind::ForEach { name, source, body } => {
+                match eval(source, env, output)? {
+                    value @ Value::Number(_) => {
+                        env.insert(name.clone(), value);
+                        match execute_statements(body, env, output)? {
+                            ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
+                            ExecutionFlow::Normal | ExecutionFlow::Break | ExecutionFlow::Continue => {}
+                        }
+                    }
+                    Value::Matrix(matrix) => {
+                        let (rows, cols) = matrix.shape();
+                        for column in 1..=cols {
+                            let value = if rows == 1 {
+                                Value::Number(matrix.get(1, column)?)
+                            } else {
+                                Value::Matrix(SunMatrix::from_rows(matrix.view(1, rows, column, column)?.to_rows())?)
+                            };
+                            env.insert(name.clone(), value);
+                            match execute_statements(body, env, output)? {
+                                ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
+                                ExecutionFlow::Break => break,
+                                ExecutionFlow::Normal | ExecutionFlow::Continue => {}
+                            }
+                        }
+                    }
+                    other => return Err(RuntimeError::Unsupported(format!("for source must be a number or matrix, got {other}"))),
+                }
+            }
+            StmtKind::While { condition, body } => {
+                while scalar_condition(eval(condition, env, output)?, "while")? {
+                    match execute_statements(body, env, output)? {
+                        ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
+                        ExecutionFlow::Break => break,
+                        ExecutionFlow::Normal | ExecutionFlow::Continue => {}
+                    }
+                }
+            }
+            StmtKind::If { branches, else_body } => {
+                let mut selected_body = else_body.as_slice();
+                for (condition, body) in branches {
+                    if scalar_condition(eval(condition, env, output)?, "if")? {
+                        selected_body = body;
+                        break;
+                    }
+                }
+                let flow = execute_statements(selected_body, env, output)?;
+                if flow != ExecutionFlow::Normal { return Ok(flow); }
+            },
+            StmtKind::Switch { selector, cases, otherwise_body } => {
+                let selector = switch_value(eval(selector, env, output)?, "selector")?;
+                let mut selected_body = otherwise_body.as_slice();
+                for (case, body) in cases {
+                    let case = switch_value(eval(case, env, output)?, "case expression")?;
+                    if selector == case {
+                        selected_body = body;
+                        break;
+                    }
+                }
+                let flow = execute_statements(selected_body, env, output)?;
+                if flow != ExecutionFlow::Normal { return Ok(flow); }
+            }
+            StmtKind::Try { body, catch_name, catch_body } => {
+                let flow = match execute_statements(body, env, output) {
+                    Ok(flow) => flow,
+                    Err(error) => {
+                        if let Some(name) = catch_name {
+                            env.insert(name.clone(), Value::Exception(error.to_exception()));
+                        }
+                        execute_statements(catch_body, env, output)?
+                    }
+                };
+                if flow != ExecutionFlow::Normal { return Ok(flow); }
+            }
+            StmtKind::Break => return Ok(ExecutionFlow::Break),
+            StmtKind::Continue => return Ok(ExecutionFlow::Continue),
+            StmtKind::Return => return Ok(ExecutionFlow::Return),
             StmtKind::Expr(expr) => {
-                let result = eval(expr, &mut env, &mut output)?;
-                if !statement.suppress_output && result != Value::Void { output.push(result.to_string()); }
+                let result = eval(expr, env, output)?;
+                if !statement.suppress_output && result != Value::Void { output.write_line(&result.to_string())?; }
             }
         }
     }
-    Ok(output)
+    Ok(ExecutionFlow::Normal)
 }
 
-fn eval_index(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>, axis: &str) -> Result<usize, RuntimeError> {
-    match eval(expr, env, output)? {
+fn eval_index(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: &str, dimension: usize) -> Result<usize, RuntimeError> {
+    let previous = output.index_end.replace(dimension);
+    let result = eval(expr, env, output);
+    output.index_end = previous;
+    index_number(result?, axis)
+}
+
+fn index_number(value: Value, axis: &str) -> Result<usize, RuntimeError> {
+    match value {
         Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 && n <= usize::MAX as f64 => Ok(n as usize),
         other => Err(RuntimeError::Unsupported(format!("matrix {axis} index must be a positive integer, got {other}"))),
     }
 }
 
-fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>) -> Result<Value, RuntimeError> {
+fn is_slice_index(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::IndexAll | ExprKind::IndexRange { .. })
+}
+
+#[derive(Clone, Copy)]
+enum IndexAxis { Row, Column }
+
+fn slice_integer(value: Value, component: &str) -> Result<f64, RuntimeError> {
+    match value {
+        Value::Number(number) if number.is_finite() && number.fract() == 0.0 => Ok(number),
+        _ => Err(RuntimeError::InvalidArgument(format!("slice {component} must be a finite integer"))),
+    }
+}
+
+fn eval_selection(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: IndexAxis, shape: (usize, usize)) -> Result<Vec<usize>, RuntimeError> {
+    let (label, dimension) = match axis { IndexAxis::Row => ("row", shape.0), IndexAxis::Column => ("column", shape.1) };
+    match &expr.kind {
+        ExprKind::IndexAll => Ok((1..=dimension).collect()),
+        ExprKind::IndexRange { start, step, stop } => {
+            let previous = output.index_end.replace(dimension);
+            let result = (|| -> Result<Vec<usize>, RuntimeError> {
+                let start = slice_integer(eval(start, env, output)?, "start")?;
+                let step = match step {
+                    Some(step) => slice_integer(eval(step, env, output)?, "step")?,
+                    None => 1.0,
+                };
+                let stop = slice_integer(eval(stop, env, output)?, "stop")?;
+                if step == 0.0 { return Err(RuntimeError::InvalidArgument("slice step must not be zero".into())); }
+                let range = NumericRange::new(start, step, stop).map_err(|_| {
+                    RuntimeError::InvalidArgument("slice range is too large or cannot advance safely".into())
+                })?;
+                if range.length == 0 { return Ok(Vec::new()); }
+                let checked_index = |number: f64| -> Result<usize, RuntimeError> {
+                    let index = index_number(Value::Number(number), label)?;
+                    if index > dimension {
+                        let (row, col) = match axis { IndexAxis::Row => (index, 1), IndexAxis::Column => (1, index) };
+                        return Err(MatrixError::IndexOutOfBounds { row, col, rows: shape.0, cols: shape.1 }.into());
+                    }
+                    Ok(index)
+                };
+                checked_index(range.value_at(0))?;
+                checked_index(range.value_at(range.length - 1))?;
+                if range.length > dimension as u64 {
+                    return Err(RuntimeError::InvalidArgument("slice has too many indices for its dimension".into()));
+                }
+                let mut selected = Vec::with_capacity(range.length as usize);
+                for offset in 0..range.length {
+                    let index = checked_index(range.value_at(offset))?;
+                    if selected.last() == Some(&index) {
+                        return Err(RuntimeError::InvalidArgument("slice step does not produce distinct indices".into()));
+                    }
+                    selected.push(index);
+                }
+                Ok(selected)
+            })();
+            output.index_end = previous;
+            result
+        }
+        _ => Ok(vec![eval_index(expr, env, output, label, dimension)?]),
+    }
+}
+
+fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
     match &expr.kind {
         ExprKind::Number(n) => Ok(Value::Number(*n)),
         ExprKind::String(s) => Ok(Value::String(s.clone())),
-        ExprKind::Identifier(name) => env.get(name).cloned().ok_or_else(|| RuntimeError::UndefinedVariable(name.clone())),
+        ExprKind::IndexEnd => output.index_end.map(|dimension| Value::Number(dimension as f64))
+            .ok_or_else(|| RuntimeError::InvalidArgument("end is only valid inside a matrix index".into())),
+        ExprKind::IndexAll | ExprKind::IndexRange { .. } => Err(RuntimeError::InvalidArgument("slice expressions require a direct bidimensional matrix index".into())),
+        ExprKind::Identifier(name) => match env.get(name) {
+            Some(value) => Ok(value.clone()),
+            None if name == "pause" => call(name, Vec::new(), output),
+            None => Err(RuntimeError::UndefinedVariable(name.clone())),
+        },
+        ExprKind::FieldAccess { object, field } => {
+            match eval(object, env, output)? {
+                Value::Exception(exception) => match field.as_str() {
+                    "message" => Ok(Value::String(exception.message)),
+                    "identifier" => Ok(Value::String(exception.identifier)),
+                    _ => Err(RuntimeError::InvalidArgument(format!("exception has no field '{field}'"))),
+                },
+                other => Err(RuntimeError::InvalidArgument(format!("field access requires an exception, got {other}"))),
+            }
+        }
         ExprKind::Matrix(rows) => {
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {
@@ -117,6 +491,15 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
         }
         ExprKind::Binary { left, op, right } => {
             let left = eval(left, env, output)?;
+            if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                let left = scalar_condition(left, "logical operator")?;
+                let result = match op {
+                    BinaryOp::And if !left => false,
+                    BinaryOp::Or if left => true,
+                    _ => scalar_condition(eval(right, env, output)?, "logical operator")?,
+                };
+                return Ok(Value::Number(result as u8 as f64));
+            }
             let right = eval(right, env, output)?;
             binary(left, *op, right)
         }
@@ -126,17 +509,24 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
             };
             // A matrix followed by parentheses is indexed with Sun's 1-based convention.
             if let Some(Value::Matrix(matrix)) = env.get(name).cloned() {
-                if arguments.len() != 2 {
-                    return Err(RuntimeError::Arity(name.clone(), "two indices: A(row, column)".into()));
+                if arguments.len() == 1 {
+                    if is_slice_index(&arguments[0]) {
+                        return Err(RuntimeError::Unsupported("linear slices are not supported yet".into()));
+                    }
+                    let index = eval_index(&arguments[0], env, output, "linear", matrix.element_count())?;
+                    return Ok(Value::Number(matrix.get_linear(index)?));
                 }
-                let row = match eval(&arguments[0], env, output)? {
-                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 => n as usize,
-                    other => return Err(RuntimeError::Unsupported(format!("matrix row index must be a positive integer, got {other}"))),
-                };
-                let col = match eval(&arguments[1], env, output)? {
-                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 => n as usize,
-                    other => return Err(RuntimeError::Unsupported(format!("matrix column index must be a positive integer, got {other}"))),
-                };
+                if arguments.len() != 2 {
+                    return Err(RuntimeError::Arity(name.clone(), "one linear index A(index) or two indices A(row, column)".into()));
+                }
+                let (rows, cols) = matrix.shape();
+                if arguments.iter().any(is_slice_index) {
+                    let row_indices = eval_selection(&arguments[0], env, output, IndexAxis::Row, (rows, cols))?;
+                    let column_indices = eval_selection(&arguments[1], env, output, IndexAxis::Column, (rows, cols))?;
+                    return Ok(Value::Matrix(matrix.select(&row_indices, &column_indices)?));
+                }
+                let row = eval_index(&arguments[0], env, output, "row", rows)?;
+                let col = eval_index(&arguments[1], env, output, "column", cols)?;
                 return Ok(Value::Number(matrix.get(row, col)?));
             }
             let mut args = Vec::with_capacity(arguments.len());
@@ -156,13 +546,13 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
                 Equal => (a == b) as u8 as f64, NotEqual => (a != b) as u8 as f64,
                 Less => (a < b) as u8 as f64, LessEqual => (a <= b) as u8 as f64,
                 Greater => (a > b) as u8 as f64, GreaterEqual => (a >= b) as u8 as f64,
-                And => ((a != 0.0) && (b != 0.0)) as u8 as f64,
-                Or => ((a != 0.0) || (b != 0.0)) as u8 as f64,
+                And | Or => unreachable!("logical operators are evaluated with short-circuiting"),
             };
             Ok(Value::Number(result))
         }
         (Value::Matrix(a), Value::Matrix(b)) => match op {
             Add => Ok(Value::Matrix(a.broadcast_add(&b)?)),
+            Subtract => Ok(Value::Matrix(a.broadcast_subtract(&b)?)),
             Multiply => Ok(Value::Matrix(a.matmul(&b)?)),
             ElementMultiply => Ok(Value::Matrix(a.broadcast_elementwise_mul(&b)?)),
             _ => Err(RuntimeError::Unsupported(format!("matrix operator {op:?}"))),
@@ -178,10 +568,64 @@ fn matrix_map(matrix: &SunMatrix, f: impl Fn(f64) -> f64) -> Result<SunMatrix, M
     SunMatrix::from_rows(matrix.to_rows().into_iter().map(|row| row.into_iter().map(&f).collect()).collect())
 }
 
-fn call(name: &str, args: Vec<Value>, output: &mut Vec<String>) -> Result<Value, RuntimeError> {
+fn valid_error_identifier(identifier: &str) -> bool {
+    identifier.split(':').count() >= 2 && identifier.split(':').all(|component| {
+        let mut characters = component.chars();
+        characters.next().is_some_and(|character| character.is_ascii_alphabetic())
+            && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
+    if name == "pause" {
+        return match args.as_slice() {
+            [] => {
+                output.wait_for_input()?;
+                Ok(Value::Void)
+            }
+            [Value::String(state)] => {
+                let previous = if output.pause_enabled { "on" } else { "off" };
+                match state.as_str() {
+                    "on" => output.pause_enabled = true,
+                    "off" => output.pause_enabled = false,
+                    "query" => {}
+                    _ => return Err(RuntimeError::InvalidArgument("pause state must be 'on', 'off' or 'query'".into())),
+                }
+                Ok(Value::String(previous.into()))
+            }
+            [Value::Number(seconds)] => {
+                let duration = Duration::try_from_secs_f64(*seconds).map_err(|_| {
+                    RuntimeError::InvalidArgument("pause duration must be finite, nonnegative and representable as a duration".into())
+                })?;
+                output.pause(duration)?;
+                Ok(Value::Void)
+            }
+            [_] => Err(RuntimeError::InvalidArgument("pause expects a duration or 'on', 'off' or 'query'".into())),
+            _ => Err(RuntimeError::Arity(name.into(), "no arguments, one duration or one state".into())),
+        };
+    }
+    if name == "error" {
+        let (identifier, message) = match args.as_slice() {
+            [Value::String(message)] => ("Sun:UserError".to_string(), message.clone()),
+            [Value::String(identifier), Value::String(message)] => (identifier.clone(), message.clone()),
+            [_] | [_, _] => return Err(RuntimeError::InvalidArgument("error expects a string message or a string identifier and message".into())),
+            _ => return Err(RuntimeError::Arity(name.into(), "one message or an identifier and message".into())),
+        };
+        if !valid_error_identifier(&identifier) {
+            return Err(RuntimeError::InvalidArgument("error identifier must have colon-separated ASCII components starting with a letter and containing only letters, digits or underscores".into()));
+        }
+        return Err(SunException { identifier, message }.into());
+    }
+    if name == "rethrow" {
+        if args.len() != 1 { return Err(RuntimeError::Arity(name.into(), "one exception argument".into())); }
+        return match args.into_iter().next().unwrap() {
+            Value::Exception(exception) => Err(exception.into()),
+            other => Err(RuntimeError::InvalidArgument(format!("rethrow expects an exception, got {other}"))),
+        };
+    }
     if name == "disp" {
         if args.len() != 1 { return Err(RuntimeError::Arity(name.into(), "one argument".into())); }
-        output.push(args[0].to_string());
+        output.write_line(&args[0].to_string())?;
         return Ok(Value::Void);
     }
     if name == "solve" {
@@ -217,6 +661,1156 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runs_matrix_slice_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/fatias.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Linhas de 2 ate end:",
+            "[21, 22, 23, 24; 31, 32, 33, 34; 41, 42, 43, 44]", "Ultima coluna:", "[14; 24; 34; 44]",
+            "Ultima linha:", "[41, 42, 43, 44]", "Linhas e colunas alternadas:", "[12, 14; 32, 34]",
+            "Ordem invertida:", "[44, 42; 34, 32; 24, 22; 14, 12]", "Copia independente:", "[99; 24; 34; 44]",
+            "Valor original:", "14"]);
+    }
+
+    #[test]
+    fn reads_bidimensional_slices_and_complete_axes() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; disp(A(2:end, :)); disp(A(:, end)); disp(A(end, :));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[21, 22, 23, 24; 31, 32, 33, 34]", "[14; 24; 34]", "[31, 32, 33, 34]"]);
+    }
+
+    #[test]
+    fn slice_steps_preserve_forward_and_reverse_order() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; disp(A(1:2:end, 2:2:end)); disp(A(end:-1:1, end:-2:1)); disp(A(1:2:end + 1, 1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[12, 14; 32, 34]", "[34, 32; 24, 22; 14, 12]", "[11; 31]"]);
+    }
+
+    #[test]
+    fn slices_remain_matrices_even_when_selecting_one_element() {
+        let module = sun_parser::parse("A = [11, 12; 21, 22]; disp(A(1:1, 2:2)); disp(A(1, 2)); selected = A(:, 1); for column = selected; disp(column); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[12]", "12", "[11; 21]"]);
+    }
+
+    #[test]
+    fn slice_results_are_independent_copies_using_the_current_shape() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; selected = A(:, :); selected(1, 1) = 99; disp(A); disp(selected); A = [7, 8, 9]; disp(A(:, end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2; 3, 4]", "[99, 2; 3, 4]", "[9]"]);
+    }
+
+    #[test]
+    fn slice_bounds_resolve_nested_indices_and_function_arguments() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; B = [1; 2]; disp(A(B(end):end, :)); disp(A(1:sqrt(end + 1):end, end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[21, 22, 23, 24; 31, 32, 33, 34]", "[14; 34]"]);
+    }
+
+    #[test]
+    fn slice_context_is_restored_after_success_and_failure() {
+        for operation in ["A(1:end, :);", "A(1:undefined, :);", "A(:, 1:undefined);"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch; end; try; disp(end); catch failure; disp(failure.identifier); end; disp(A(end, end));");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:InvalidArgument", "4"]);
+        }
+    }
+
+    #[test]
+    fn slice_bounds_are_checked_before_large_index_allocations() {
+        for operation in ["A(1:1000000000, :);", "A(:, 1:end + 1);", "A(end + 1:end + 1, :);", "A(1, end + 1:end + 1);"] {
+            let source = format!("A = [1, 2; 3, 4]; {operation}");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap_err().identifier(), "Sun:IndexOutOfBounds");
+        }
+    }
+
+    #[test]
+    fn slices_reject_zero_steps_fractional_components_and_nonfinite_bounds() {
+        for operation in ["A(1:0:end, :);", "A(1:0.5:end, :);", "A(1.5:end, :);", "A(1:2.5, :);",
+            "A(1:(1 / 0):end, :);", "A(1:(0 / 0), :);", "A(1:1e100, :);"] {
+            let source = format!("A = [1, 2; 3, 4]; {operation}");
+            assert!(matches!(execute(&sun_parser::parse(&source).unwrap()), Err(RuntimeError::InvalidArgument(_))));
+        }
+    }
+
+    #[test]
+    fn empty_slices_follow_the_current_nonempty_matrix_policy() {
+        for operation in ["A(2:1, :);", "A(1:-1:2, :);", "A(:, 2:1);"] {
+            let source = format!("A = [1, 2; 3, 4]; {operation}");
+            assert!(matches!(execute(&sun_parser::parse(&source).unwrap()), Err(RuntimeError::Matrix(MatrixError::Empty))));
+        }
+    }
+
+    #[test]
+    fn unsupported_slice_forms_fail_without_mutating_the_target() {
+        for operation in ["A(:, 1) = 9;", "A(1:end, :) = 9;", "A(:) = 9;", "A(:);", "A(1:end);"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch failure; disp(failure.identifier); end; disp(A);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:UnsupportedOperation", "[1, 2; 3, 4]"]);
+        }
+        for source in ["disp(:);", "sum(1:3);"] {
+            assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::InvalidArgument(_))));
+        }
+    }
+
+    #[test]
+    fn runs_linear_index_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/indices_lineares.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Ordem linear por colunas:", "11", "21", "12", "22", "13", "23",
+            "Ultimo elemento:", "23", "Penultimo elemento:", "13", "Apos atribuicoes lineares:",
+            "[11, 12, 88; 21, 22, 99]", "Indice aninhado:", "99", "Sun:IndexOutOfBounds"]);
+    }
+
+    #[test]
+    fn reads_linear_indices_in_column_major_order() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; for index = 1:6; disp(A(index)); end; disp(A(end)); disp(A(end - 1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "4", "2", "5", "3", "6", "6", "3"]);
+    }
+
+    #[test]
+    fn linear_indexing_handles_vectors_singletons_and_transposes() {
+        let module = sun_parser::parse("row = [7, 8, 9]; column = [10; 20; 30]; scalar = [42]; disp(row(2)); disp(row(end)); disp(column(2)); disp(column(end)); disp(scalar(end)); A = [1, 2, 3; 4, 5, 6]; T = transpose(A); for index = 1:6; disp(T(index)); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["8", "9", "20", "30", "42", "1", "2", "3", "4", "5", "6"]);
+    }
+
+    #[test]
+    fn linear_assignments_use_column_order_and_preserve_shape() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(2) = 40; A(5) = 30; A(end) = 99; disp(A); disp(A(2, 1)); disp(A(1, 3));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2, 30; 40, 5, 99]", "40", "30"]);
+    }
+
+    #[test]
+    fn linear_end_uses_current_element_count_after_reassignment() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; disp(A(end)); A = [7, 8, 9]; disp(A(end)); A(end) = 10; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["4", "9", "[7, 8, 10]"]);
+    }
+
+    #[test]
+    fn linear_and_bidimensional_end_contexts_nest_and_restore() {
+        let module = sun_parser::parse("A = [11, 12, 13; 21, 22, 23]; B = [1, 2]; disp(A(B(end))); disp(A(B(end) + end - 2)); disp(A(B(end), end)); disp(A(B(end, 1) + end - 1)); disp(A(sqrt(end + 3)));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["21", "23", "23", "23", "12"]);
+    }
+
+    #[test]
+    fn linear_assignment_rhs_uses_its_own_matrix_context() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; B = [1, 2]; A(end) = B(end); A(end - 1) = A(2); disp(A); A(B(end) + end - 2) = 99; disp(A(end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2, 4; 4, 5, 2]", "99"]);
+    }
+
+    #[test]
+    fn linear_index_context_is_restored_on_success_and_failure() {
+        for operation in ["A(end);", "A(end + undefined);", "A(end + undefined) = 7;"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch; end; try; disp(end); catch failure; disp(failure.identifier); end; disp(A(end));");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:InvalidArgument", "4"]);
+        }
+        let module = sun_parser::parse("A = [1]; A(end) = sqrt(end);").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn linear_bounds_errors_preserve_matrix_and_use_existing_identifier() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; try; A(end + 1) = 0; catch failure; disp(failure.identifier); end; try; disp(A(7)); catch failure; disp(failure.identifier); end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Sun:IndexOutOfBounds", "Sun:IndexOutOfBounds", "[1, 2, 3; 4, 5, 6]"]);
+    }
+
+    #[test]
+    fn linear_indices_reject_nonpositive_fractional_and_nonfinite_values() {
+        for index in ["0", "-1", "1.5", "0 / 0", "1 / 0", "end / 4", "1e100", "[1]"] {
+            for operation in [format!("disp(A({index}));"), format!("A({index}) = 7;")] {
+                let source = format!("A = [1, 2, 3; 4, 5, 6]; {operation}");
+                let error = execute(&sun_parser::parse(&source).unwrap()).unwrap_err();
+                assert!(error.to_string().contains("positive integer"), "unexpected error for {operation}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn linear_assignments_require_existing_matrix_and_numeric_values() {
+        let module = sun_parser::parse("missing(end) = 7;").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(name)) if name == "missing"));
+        let module = sun_parser::parse("A = 7; A(1) = 9;").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("non-matrix"));
+        let module = sun_parser::parse("A = [1]; A(end) = [7];").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("assignment value must be a number"));
+    }
+
+    #[test]
+    fn runs_index_end_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/indices_end.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Ultima linha, primeira coluna:", "31",
+            "Primeira linha, ultima coluna:", "14", "Penultima linha, penultima coluna:", "23",
+            "Apos alterar o ultimo elemento:", "[11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 99]",
+            "Indice aninhado:", "99", "Sun:IndexOutOfBounds"]);
+    }
+
+    #[test]
+    fn reads_last_rows_and_columns_using_index_end() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; disp(A(end, 1)); disp(A(1, end)); disp(A(end, end)); disp(A(end - 1, end - 1)); disp(A(end / end, end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["31", "14", "34", "23", "14"]);
+    }
+
+    #[test]
+    fn index_end_uses_current_shape_after_reassignment() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; disp(A(end, end)); A = [7, 8, 9]; disp(A(end, end)); A = [5; 6; 7]; disp(A(end, end)); A = [42]; disp(A(end, end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["4", "9", "7", "42"]);
+    }
+
+    #[test]
+    fn nested_matrix_indices_resolve_end_for_their_own_dimensions() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; B = [1; 2]; disp(A(B(end, 1), end)); disp(A(B(end, 1) + end - 2, end)); disp(A(end - B(end, 1), end)); disp(A(end, B(1, end)));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["24", "34", "14", "31"]);
+    }
+
+    #[test]
+    fn functions_in_indices_inherit_the_enclosing_end_dimension() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; disp(A(end, sqrt(end))); disp(A(sum([end - 1, 1]), 1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["32", "31"]);
+    }
+
+    #[test]
+    fn assigns_using_end_and_evaluates_rhs_in_its_own_index_context() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; B = [8; 9; 10]; A(end, end) = B(end, 1); A(end - 1, end - 1) = 7; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 7, 3; 4, 5, 10]"]);
+    }
+
+    #[test]
+    fn assignment_indices_support_nested_end_resolution() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4; 5, 6]; B = [1; 2]; A(B(end, 1) + end - 2, end) = 99; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2; 3, 4; 5, 99]"]);
+    }
+
+    #[test]
+    fn index_end_does_not_grow_matrices_or_bypass_index_validation() {
+        for source in ["A(end + 1, 1);", "A(1, end + 1);", "A(end + 1, 1) = 9;", "A(1, end + 1) = 9;"] {
+            let module = sun_parser::parse(&format!("A = [1, 2; 3, 4; 5, 6]; {source}")).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::Matrix(MatrixError::IndexOutOfBounds { .. }))));
+        }
+        for source in ["A(end - end, 1);", "A(end / 2, 1);", "A(end / (end - end), 1);", "A(end - end, 1) = 9;"] {
+            let module = sun_parser::parse(&format!("A = [1, 2; 3, 4; 5, 6]; {source}")).unwrap();
+            assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
+        }
+    }
+
+    #[test]
+    fn end_is_not_available_to_functions_without_an_enclosing_index() {
+        for source in ["disp(end);", "sqrt(end);", "A = [1]; A(end, 1) = sqrt(end);"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err();
+            assert_eq!(error.identifier(), "Sun:InvalidArgument");
+            assert!(error.to_string().contains("inside a matrix index"));
+        }
+    }
+
+    #[test]
+    fn index_context_is_restored_after_success_and_errors() {
+        for index_expression in ["A(end, 1);", "A(end + undefined, 1);", "A(end + undefined, 1) = 9;"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {index_expression} catch; end; try; disp(end); catch failure; disp(failure.identifier); end; disp(A(end, end));");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:InvalidArgument", "4"]);
+        }
+    }
+
+    #[test]
+    fn index_end_requires_a_matrix_target_and_one_or_two_indices() {
+        let module = sun_parser::parse("missing(end, 1) = 7;").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(name)) if name == "missing"));
+        let module = sun_parser::parse("A = 7; A(end, 1) = 9;").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("non-matrix"));
+        for source in ["A = [1, 2]; A();", "A = [1, 2]; A(1, 1, 1);"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::Arity(_, _))));
+        }
+    }
+
+    #[test]
+    fn pause_controls_report_and_restore_previous_state() {
+        let module = sun_parser::parse("disp(pause(\"query\")); previous = pause(\"off\"); disp(previous); disp(pause(\"query\")); pause(previous); disp(pause(\"query\"));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["on", "on", "off", "on"]);
+    }
+
+    #[test]
+    fn repeated_pause_controls_return_previous_state_without_waiting() {
+        let module = sun_parser::parse("disp(pause(\"off\")); disp(pause(\"off\")); disp(pause(\"on\")); disp(pause(\"on\")); disp(pause(\"query\"));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["on", "off", "off", "on", "on"]);
+    }
+
+    #[test]
+    fn pause_off_suppresses_timed_interactive_and_bare_waits() {
+        let module = sun_parser::parse("pause(\"off\"); pause(5); pause(); pause; disp(\"off\"); pause(\"on\"); pause(0.125); pause(); pause;").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("off".into()), HostEvent::Pause(Duration::from_millis(125)),
+            HostEvent::InteractivePause, HostEvent::InteractivePause]);
+    }
+
+    #[test]
+    fn pause_state_is_shared_by_blocks_but_not_separate_executions() {
+        let module = sun_parser::parse("for index = 1:2; if index == 1; pause(\"off\"); else; pause(1); end; end; try; error(\"failure\"); catch failure; disp(pause(\"query\")); end;").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        let module = sun_parser::parse("disp(pause(\"query\")); pause();").unwrap();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("off".into()), HostEvent::Line("on".into()), HostEvent::InteractivePause]);
+    }
+
+    #[test]
+    fn disabled_pauses_still_validate_arguments_without_changing_state() {
+        let module = sun_parser::parse("pause(\"off\"); try; pause(-1); catch; disp(pause(\"query\")); end; try; pause(\"ON\"); catch; disp(pause(\"query\")); end; try; pause(\"on\", \"off\"); catch; disp(pause(\"query\")); end; pause(0);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("off".into()), HostEvent::Line("off".into()), HostEvent::Line("off".into())]);
+    }
+
+    #[test]
+    fn interactive_pause_obeys_branches_and_control_flow() {
+        let module = sun_parser::parse("if 0; pause(); end; for index = 1:2; continue; pause; end; return; pause();").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert!(host.events.is_empty());
+    }
+
+    #[test]
+    fn bare_pause_respects_an_existing_variable_named_pause() {
+        let module = sun_parser::parse("pause = 7; disp(pause); pause\npause(0);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("7".into()), HostEvent::Line("7".into()), HostEvent::Pause(Duration::ZERO)]);
+    }
+
+    #[test]
+    fn collecting_host_reports_unsupported_interactive_input_without_blocking() {
+        for source in ["pause();", "pause;"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err();
+            assert_eq!(error.identifier(), "Sun:IOError");
+            assert!(error.to_string().contains("input support"));
+        }
+    }
+
+    #[test]
+    fn interactive_input_errors_are_catchable_and_disabled_waits_skip_input() {
+        #[derive(Default)]
+        struct FailingInputHost { lines: Vec<String> }
+        impl RuntimeHost for FailingInputHost {
+            fn write_line(&mut self, line: &str) -> io::Result<()> {
+                self.lines.push(line.into());
+                Ok(())
+            }
+            fn wait_for_input(&mut self) -> io::Result<()> {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "input ended"))
+            }
+        }
+        let module = sun_parser::parse("try; pause(); catch failure; disp(failure.identifier); end; disp(pause(\"query\")); pause(\"off\"); pause(); pause;").unwrap();
+        let mut host = FailingInputHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.lines, vec!["Sun:IOError", "on"]);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum HostEvent { Line(String), Pause(Duration), InteractivePause }
+
+    #[derive(Default)]
+    struct RecordingPauseHost { events: Vec<HostEvent> }
+
+    impl RuntimeHost for RecordingPauseHost {
+        fn write_line(&mut self, line: &str) -> io::Result<()> {
+            self.events.push(HostEvent::Line(line.into()));
+            Ok(())
+        }
+
+        fn pause(&mut self, duration: Duration) -> io::Result<()> {
+            self.events.push(HostEvent::Pause(duration));
+            Ok(())
+        }
+
+        fn wait_for_input(&mut self) -> io::Result<()> {
+            self.events.push(HostEvent::InteractivePause);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn runs_interactive_pause_example_without_real_input_or_waits() {
+        let module = sun_parser::parse(include_str!("../../../examples/pause_interativa.sun")).unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("Estado inicial:".into()), HostEvent::Line("on".into()),
+            HostEvent::Line("Pausas desativadas:".into()), HostEvent::Line("off".into()),
+            HostEvent::Line("Pressione uma tecla para continuar.".into()), HostEvent::InteractivePause,
+            HostEvent::Line("Pressione outra tecla para concluir.".into()), HostEvent::InteractivePause,
+            HostEvent::Line("Execucao concluida.".into())]);
+    }
+
+    #[test]
+    fn runs_pause_example_without_real_waits() {
+        let module = sun_parser::parse(include_str!("../../../examples/pause.sun")).unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("Inicio do processamento:".into()),
+            HostEvent::Line("1".into()), HostEvent::Pause(Duration::from_millis(100)),
+            HostEvent::Line("2".into()), HostEvent::Pause(Duration::from_millis(100)),
+            HostEvent::Line("3".into()), HostEvent::Pause(Duration::from_millis(100)),
+            HostEvent::Line("Processamento concluido.".into())]);
+    }
+
+    #[test]
+    fn pause_accepts_zero_without_emitting_an_implicit_result() {
+        let module = sun_parser::parse("pause(0)\npause(-0);").unwrap();
+        assert!(execute(&module).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pause_occurs_between_incremental_output_events() {
+        let module = sun_parser::parse("value = 1\npause(0.125); disp(2);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("value = 1".into()),
+            HostEvent::Pause(Duration::from_millis(125)), HostEvent::Line("2".into())]);
+    }
+
+    #[test]
+    fn pause_evaluates_expressions_and_obeys_loop_and_return_flow() {
+        let module = sun_parser::parse("for index = 1:3; if index == 2; continue; end; pause(index / 10); end; return; pause(10);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Pause(Duration::from_millis(100)), HostEvent::Pause(Duration::from_millis(300))]);
+    }
+
+    #[test]
+    fn pause_rejects_invalid_arguments_before_invoking_host_pause() {
+        for source in ["pause(1, 2);", "pause(-1);", "pause(0 / 0);", "pause(1 / 0);",
+            "pause(1e308);", "pause(\"invalid\");", "pause([1]);", "pause(disp(1));"] {
+            let module = sun_parser::parse(source).unwrap();
+            let mut host = RecordingPauseHost::default();
+            let error = execute_with_host(&module, &mut host).unwrap_err();
+            assert!(matches!(error, RuntimeError::InvalidArgument(_) | RuntimeError::Arity(_, _)), "unexpected error for {source}: {error}");
+            assert!(!host.events.iter().any(|event| matches!(event, HostEvent::Pause(_) | HostEvent::InteractivePause)));
+        }
+    }
+
+    #[test]
+    fn pause_validation_errors_can_be_handled_by_named_catch() {
+        let module = sun_parser::parse("try; pause(-1); catch failure; disp(failure.identifier); end; pause(0);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.events, vec![HostEvent::Line("Sun:InvalidArgument".into()), HostEvent::Pause(Duration::ZERO)]);
+    }
+
+    #[test]
+    fn host_pause_errors_propagate_and_can_be_caught() {
+        #[derive(Default)]
+        struct FailingPauseHost { lines: Vec<String> }
+        impl RuntimeHost for FailingPauseHost {
+            fn write_line(&mut self, line: &str) -> io::Result<()> {
+                self.lines.push(line.into());
+                Ok(())
+            }
+            fn pause(&mut self, _duration: Duration) -> io::Result<()> {
+                Err(io::Error::other("pause failed"))
+            }
+        }
+        let mut host = FailingPauseHost::default();
+        let module = sun_parser::parse("pause(1);").unwrap();
+        let error = execute_with_host(&module, &mut host).unwrap_err();
+        assert_eq!(error.identifier(), "Sun:IOError");
+        let module = sun_parser::parse("try; pause(1); catch failure; disp(failure.identifier); end").unwrap();
+        execute_with_host(&module, &mut host).unwrap();
+        assert_eq!(host.lines, vec!["Sun:IOError"]);
+    }
+
+    #[test]
+    fn pause_is_not_called_after_an_earlier_error() {
+        let module = sun_parser::parse("disp(1); error(\"stop\"); pause(1);").unwrap();
+        let mut host = RecordingPauseHost::default();
+        assert!(execute_with_host(&module, &mut host).is_err());
+        assert_eq!(host.events, vec![HostEvent::Line("1".into())]);
+    }
+
+    #[test]
+    fn host_write_errors_are_reported_as_io_errors() {
+        struct FailingHost;
+        impl RuntimeHost for FailingHost {
+            fn write_line(&mut self, _line: &str) -> io::Result<()> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed output"))
+            }
+        }
+        let module = sun_parser::parse("disp(1); disp(undefined);").unwrap();
+        let error = execute_with_host(&module, &mut FailingHost).unwrap_err();
+        assert_eq!(error.identifier(), "Sun:IOError");
+        assert!(matches!(error, RuntimeError::Io(_)));
+    }
+
+    #[test]
+    fn streams_output_before_an_uncaught_error() {
+        struct RecordingHost { lines: Vec<String> }
+        impl RuntimeHost for RecordingHost {
+            fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+                self.lines.push(line.to_string());
+                Ok(())
+            }
+        }
+        let module = sun_parser::parse("disp(1); error(\"stop\");").unwrap();
+        let mut host = RecordingHost { lines: Vec::new() };
+        assert!(execute_with_host(&module, &mut host).is_err());
+        assert_eq!(host.lines, vec!["1"]);
+    }
+
+    #[test]
+    fn runs_named_exception_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/excecoes.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Erro numerico identificado:", "Sun:SingularMatrix",
+            "matrix is singular and cannot be inverted or solved", "Erro de validacao:", "Pressao acima do limite.",
+            "Repasse de excecao:", "Registrando erro antes do repasse.", "Industria:SensorInvalido",
+            "Leitura do sensor invalida.", "Execucao concluida."]);
+    }
+
+    #[test]
+    fn named_catch_exposes_identifiers_and_messages_for_builtin_errors() {
+        for (body, identifier) in [
+            ("disp(undefined);", "Sun:UndefinedVariable"),
+            ("1 + \"text\";", "Sun:UnsupportedOperation"),
+            ("sqrt();", "Sun:InvalidArgumentCount"),
+            ("for index = 1:0:2; end", "Sun:InvalidForRange"),
+            ("[];", "Sun:EmptyMatrix"),
+            ("[1; 2, 3];", "Sun:RaggedMatrixRows"),
+            ("A = [1]; A(2, 1);", "Sun:IndexOutOfBounds"),
+            ("[1, 2] + [1, 2, 3];", "Sun:IncompatibleDimensions"),
+            ("inv([1, 2; 2, 4]);", "Sun:SingularMatrix"),
+            ("rethrow(1);", "Sun:InvalidArgument"),
+        ] {
+            let original = execute(&sun_parser::parse(body).unwrap()).unwrap_err();
+            let source = format!("try; {body} catch failure; disp(failure.identifier); disp(failure.message); end");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec![identifier.to_string(), original.to_string()]);
+        }
+    }
+
+    #[test]
+    fn error_raises_default_or_custom_exceptions() {
+        for (source, identifier, message) in [
+            ("error(\"failure\");", "Sun:UserError", "failure"),
+            ("error(\"Plant:Pressure:TooHigh\", \"Pressure exceeded\");", "Plant:Pressure:TooHigh", "Pressure exceeded"),
+            ("error(\"literal %s\");", "Sun:UserError", "literal %s"),
+        ] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err();
+            let exception = error.to_exception();
+            assert_eq!(exception.identifier, identifier);
+            assert_eq!(exception.message, message);
+            assert_eq!(error.to_string(), format!("{identifier}: {message}"));
+        }
+    }
+
+    #[test]
+    fn named_catch_retains_exception_and_aliases_after_handler() {
+        let module = sun_parser::parse("try; error(\"Plant:Failure\", \"failed\"); catch failure; saved = failure; end; failure = 0; disp(saved.identifier); disp(saved.message); disp(saved);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Plant:Failure", "failed", "Plant:Failure: failed"]);
+    }
+
+    #[test]
+    fn named_catch_only_assigns_variable_when_an_error_occurs() {
+        let module = sun_parser::parse("failure = 7; try; value = 1; catch failure; disp(undefined); end; disp(failure);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["7"]);
+        let module = sun_parser::parse("try; value = 1; catch failure; end; disp(failure);").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(name)) if name == "failure"));
+    }
+
+    #[test]
+    fn rethrow_preserves_original_builtin_identifier_and_message() {
+        let original = execute(&sun_parser::parse("inv([1, 2; 2, 4]);").unwrap()).unwrap_err().to_exception();
+        let module = sun_parser::parse("try; try; inv([1, 2; 2, 4]); catch inner; rethrow(inner); end; catch outer; rethrow(outer); end").unwrap();
+        assert_eq!(execute(&module).unwrap_err().to_exception(), original);
+    }
+
+    #[test]
+    fn rethrow_custom_exception_can_be_selected_by_switch() {
+        let module = sun_parser::parse("try; try; error(\"Plant:Failure\", \"failed\"); catch inner; disp(inner.message); rethrow(inner); end; catch outer; switch outer.identifier; case \"Plant:Failure\"; disp(outer.message); otherwise; rethrow(outer); end; end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["failed", "failed"]);
+    }
+
+    #[test]
+    fn nested_named_handlers_preserve_saved_exception_values() {
+        let module = sun_parser::parse("try; error(\"outer\"); catch failure; saved = failure; try; error(\"inner\"); catch failure; disp(failure.message); end; disp(saved.message); disp(failure.message); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["inner", "outer", "inner"]);
+    }
+
+    #[test]
+    fn named_handler_errors_propagate_as_new_exceptions() {
+        let module = sun_parser::parse("try; try; error(\"original\"); catch inner; disp(inner.unknown); end; catch outer; disp(outer.identifier); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Sun:InvalidArgument"]);
+    }
+
+    #[test]
+    fn rejects_invalid_error_arguments_identifiers_and_rethrow_values() {
+        for source in ["error();", "error(1);", "error(\"Plant:Failure\", 1);", "error(1, \"message\");",
+            "error(\"one\", \"two\", \"three\");", "error(\"\", \"message\");", "error(\"NoNamespace\", \"message\");",
+            "error(\":Failure\", \"message\");", "error(\"Plant::Failure\", \"message\");", "error(\"Plant:1Failure\", \"message\");",
+            "error(\"Plant:bad-id\", \"message\");", "rethrow();", "rethrow(1);", "rethrow(\"message\");", "rethrow([1]);",
+            "rethrow(1, 2);", "disp((1).message);"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err();
+            assert!(matches!(error, RuntimeError::InvalidArgument(_) | RuntimeError::Arity(_, _)), "unexpected error for {source}: {error}");
+        }
+    }
+
+    #[test]
+    fn named_catch_preserves_return_break_and_continue_behavior() {
+        let module = sun_parser::parse("for index = 1:4; try; error(\"retry\"); catch failure; if index == 2; continue; elseif index == 4; break; end; disp(index); end; end; try; return; catch failure; disp(undefined); end; disp(undefined);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "3"]);
+        let module = sun_parser::parse("try; error(\"stop\"); catch failure; disp(failure.message); return; end; disp(undefined);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["stop"]);
+    }
+
+    #[test]
+    fn runs_try_catch_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/try_catch.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Tentativa de inversao:", "Matriz singular: usando identidade.",
+            "[1, 0; 0, 1]", "Processamento por coluna:", "11", "Coluna ignorada por erro de indice.", "33", "Execucao concluida."]);
+    }
+
+    #[test]
+    fn try_skips_catch_when_no_error_occurs() {
+        let module = sun_parser::parse("try; value = 7; disp(value); catch; disp(undefined); end; try; catch; disp(undefined); end; disp(value);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["7", "7"]);
+    }
+
+    #[test]
+    fn try_catches_runtime_error_categories() {
+        for body in ["value = undefined;", "value = sqrt();", "value = inv([1, 2; 2, 4]);",
+            "value = [1, 2] + [1, 2, 3];", "for index = 1:0:2; end", "value = 1 + \"text\";",
+            "A = [1]; value = A(2, 1);", "if [1]; end", "switch [1]; end"] {
+            let source = format!("try; {body} disp(99); catch; disp(7); end; disp(8);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["7", "8"], "unexpected result for {body}");
+        }
+    }
+
+    #[test]
+    fn try_preserves_output_and_mutations_before_error_without_rollback() {
+        let module = sun_parser::parse("A = [1, 2]; value = 1; try; disp(10); value = 7; A(1, 2) = 9; value = undefined; disp(99); catch; disp(value); disp(A); value = 8; end; disp(value);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["10", "7", "[1, 9]", "8"]);
+    }
+
+    #[test]
+    fn try_can_suppress_an_error_with_an_empty_catch() {
+        let module = sun_parser::parse("try; disp(undefined); catch; end; disp(3);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn catch_errors_propagate_instead_of_reentering_the_same_handler() {
+        let module = sun_parser::parse("try; disp(original_error); catch; disp(handler_error); end").unwrap();
+        let error = execute(&module).unwrap_err();
+        assert!(matches!(error, RuntimeError::UndefinedVariable(name) if name == "handler_error"));
+    }
+
+    #[test]
+    fn outer_try_catches_errors_from_inner_catch() {
+        let module = sun_parser::parse("try; try; disp(1); disp(undefined); catch; disp(2); disp(handler_error); end; disp(99); catch; disp(3); end; disp(4);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn inner_try_handles_error_without_triggering_outer_catch() {
+        let module = sun_parser::parse("try; try; disp(undefined); catch; disp(2); end; disp(3); catch; disp(99); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["2", "3"]);
+    }
+
+    #[test]
+    fn try_does_not_catch_return_and_catch_can_return() {
+        for source in ["disp(1); try; return; catch; disp(undefined); end; disp(undefined);",
+            "disp(1); try; disp(undefined); catch; return; end; disp(undefined);",
+            "disp(1); for index = 1:2; try; switch index; case 1; if 1; return; end; end; catch; disp(undefined); end; end; disp(undefined);"] {
+            assert_eq!(execute(&sun_parser::parse(source).unwrap()).unwrap(), vec!["1"]);
+        }
+    }
+
+    #[test]
+    fn try_does_not_catch_loop_control() {
+        let module = sun_parser::parse("for index = 1:5; try; if index == 2; continue; elseif index == 4; break; end; disp(index); catch; disp(undefined); end; end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "3", "4"]);
+    }
+
+    #[test]
+    fn catch_forwards_break_and_continue_to_enclosing_loop() {
+        let module = sun_parser::parse("for index = 1:5; try; disp(undefined); catch; if index == 2; continue; elseif index == 4; break; end; disp(index); end; end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "3", "4"]);
+    }
+
+    #[test]
+    fn try_handles_errors_from_nested_loops_and_resumes_after_handler() {
+        let module = sun_parser::parse("try; for index = 1:3; disp(index); if index == 2; disp(undefined); end; end; disp(99); catch; disp(8); end; disp(index); try; while 1; break; end; disp(9); catch; disp(undefined); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "8", "2", "9"]);
+    }
+
+    #[test]
+    fn try_preserves_implicit_output_rules_in_both_bodies() {
+        let module = sun_parser::parse("try\n value = 1\n disp(undefined);\ncatch\n value = 2\n value; disp(value);\nend;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["value = 1", "value = 2", "2"]);
+    }
+
+    #[test]
+    fn try_does_not_treat_nonfinite_results_as_errors() {
+        let module = sun_parser::parse("try; value = 1 / 0; value = 0 / 0; disp(1); catch; disp(undefined); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1"]);
+    }
+
+    #[test]
+    fn runs_return_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/return.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Busca por valor acima do limite:", "Primeiro valor encontrado:", "60"]);
+    }
+
+    #[test]
+    fn return_ends_script_successfully_and_preserves_prior_output() {
+        assert!(execute(&sun_parser::parse("return").unwrap()).unwrap().is_empty());
+        let module = sun_parser::parse("value = 3\ndisp(value); return; disp(undefined);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["value = 3", "3"]);
+    }
+
+    #[test]
+    fn return_propagates_from_each_conditional_branch() {
+        for source in ["if 1; return; end", "if 0; elseif 1; return; end", "if 0; else; return; end",
+            "switch 1; case 1; return; end", "switch 1; case 2; disp(undefined); otherwise; return; end"] {
+            let source = format!("disp(1); {source}; disp(undefined);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["1"]);
+        }
+    }
+
+    #[test]
+    fn return_ends_script_from_every_loop_form() {
+        for source in ["counter = 0; while counter < 2; counter = counter + 1; return; end",
+            "for index = 1:2; return; end", "for value = 7; return; end",
+            "for value = [1, 2]; return; end", "for column = [1, 2; 3, 4]; return; end"] {
+            let source = format!("disp(1); {source}; disp(undefined);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["1"]);
+        }
+    }
+
+    #[test]
+    fn return_crosses_all_nested_blocks_instead_of_exiting_one_loop() {
+        let module = sun_parser::parse("disp(1); for outer = 1:2; for column = [1, 2; 3, 4]; for value = 7; counter = 0; while counter < 2; counter = counter + 1; if value; switch value; case 7; disp(column); return; otherwise; disp(undefined); end; end; disp(undefined); end; disp(undefined); end; disp(undefined); end; disp(undefined); end; disp(undefined);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "[1; 3]"]);
+    }
+
+    #[test]
+    fn return_in_unexecuted_code_does_not_stop_script() {
+        let module = sun_parser::parse("if 0; return; end; if 1; elseif 1; return; else; return; end; while 0; return; end; for index = 2:1; return; end; switch 1; case 1; case 2; return; otherwise; return; end; disp(9);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["9"]);
+    }
+
+    #[test]
+    fn return_does_not_swallow_prior_errors_or_terminate_later_executions() {
+        assert!(matches!(execute(&sun_parser::parse("disp(undefined); return;").unwrap()), Err(RuntimeError::UndefinedVariable(_))));
+        assert!(execute(&sun_parser::parse("return;").unwrap()).unwrap().is_empty());
+        assert_eq!(execute(&sun_parser::parse("disp(2);").unwrap()).unwrap(), vec!["2"]);
+    }
+
+    #[test]
+    fn runs_switch_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/switch.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Selecao numerica:", "Multiplicacao", "Selecao por texto:",
+            "Resfriamento ativado", "Caso padrao:", "Opcao desconhecida", "Switch dentro de loop:", "1", "3"]);
+    }
+
+    #[test]
+    fn switch_executes_only_the_first_matching_case() {
+        let module = sun_parser::parse("switch 2; case 1; disp(undefined); case 2; disp(20); case 2; disp(undefined); case undefined; disp(99); otherwise; disp(undefined); end; disp(30);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["20", "30"]);
+    }
+
+    #[test]
+    fn switch_matches_numbers_and_strings_without_type_coercion() {
+        for (source, expected) in [
+            ("switch -2; case -1 - 1; disp(1); end", "1"),
+            ("switch \"2\"; case 2; disp(undefined); case '2'; disp(2); end", "2"),
+            ("switch 2; case '2'; disp(undefined); otherwise; disp(3); end", "3"),
+            ("switch \"Mode\"; case \"mode\"; disp(undefined); otherwise; disp(4); end", "4"),
+            ("switch \"\"; case ''; disp(5); end", "5"),
+            ("switch 0; case -0; disp(6); end", "6"),
+        ] {
+            assert_eq!(execute(&sun_parser::parse(source).unwrap()).unwrap(), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn switch_uses_otherwise_or_does_nothing_when_no_case_matches() {
+        let module = sun_parser::parse("switch 3; case 1; disp(undefined); otherwise; disp(30); end; switch 3; case 1; disp(undefined); end; switch 1; end; switch 1; otherwise; end; switch 1; case 1; case undefined; disp(undefined); end; disp(40);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["30", "40"]);
+    }
+
+    #[test]
+    fn switch_supports_computed_expressions_and_shared_variables() {
+        let module = sun_parser::parse("mode = 3; switch sum([1, 2]); case mode - 1; disp(undefined); case mode; mode = 9; end; disp(mode);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["9"]);
+    }
+
+    #[test]
+    fn switch_preserves_implicit_output_and_supports_nesting() {
+        let module = sun_parser::parse("switch 1\ncase 1\n value = 7\n if value; switch \"mode\"; case \"mode\"; disp(value); end; end\notherwise\n disp(undefined);\nend;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["value = 7", "7"]);
+    }
+
+    #[test]
+    fn switch_forwards_break_and_continue_to_the_enclosing_for() {
+        let module = sun_parser::parse("for index = 1:5; switch index; case 2; continue; case 4; break; otherwise; disp(index); end; end; disp(index); for index = [1, 2, 3]; switch index; case 1; continue; case 2; break; end; disp(undefined); end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "3", "4", "2"]);
+    }
+
+    #[test]
+    fn switch_forwards_loop_control_through_nested_switches_to_while() {
+        let module = sun_parser::parse("counter = 0; while counter < 5; counter = counter + 1; switch counter; case 1; continue; case 3; switch \"stop\"; case \"stop\"; if 1; break; end; end; otherwise; disp(counter); end; end; disp(counter); switch 1; case 1; while 1; break; end; disp(9); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["2", "3", "9"]);
+    }
+
+    #[test]
+    fn switch_rejects_unsupported_selectors_even_with_no_cases() {
+        for source in ["switch [1]; case 1; end", "switch [1, 2]; end", "switch disp(1); end"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err().to_string();
+            assert!(error.contains("switch selector must be a number or string"));
+        }
+    }
+
+    #[test]
+    fn switch_validates_only_the_case_expressions_it_evaluates() {
+        for source in ["switch 1; case [1]; end", "switch 1; case disp(1); end"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err().to_string();
+            assert!(error.contains("switch case expression must be a number or string"));
+        }
+        let module = sun_parser::parse("switch 1; case 1; disp(1); case [1]; disp(undefined); end").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1"]);
+    }
+
+    #[test]
+    fn switch_propagates_errors_from_evaluated_expressions_and_bodies() {
+        for source in ["switch undefined; end", "switch 1; case undefined; end", "switch 1; case 1; disp(undefined); end",
+            "switch 1; otherwise; disp(undefined); end"] {
+            assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::UndefinedVariable(_))));
+        }
+    }
+
+    #[test]
+    fn switch_uses_numeric_equality_for_nonfinite_values() {
+        let module = sun_parser::parse("switch 1 / 0; case 1 / 0; disp(1); end; switch 0 / 0; case 0 / 0; disp(undefined); otherwise; disp(2); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn runs_matrix_for_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/for_matrizes.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Colunas da matriz:", "[1; 10]", "[2; 20]", "[3; 30]",
+            "Soma de todos os elementos:", "66", "Vetor linha:", "5", "10", "15", "Vetor coluna:", "[5; 10; 15]",
+            "Vetor coluna transposto:", "5", "10", "15", "Somas por coluna com saltos:", "11", "33"]);
+    }
+
+    #[test]
+    fn iterates_matrix_columns_in_matlab_order() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; for column = A; disp(column); end; disp(column);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1; 4]", "[2; 5]", "[3; 6]", "[3; 6]"]);
+    }
+
+    #[test]
+    fn iterates_row_vectors_as_numbers_and_column_vectors_once() {
+        let module = sun_parser::parse("total = 0; for value = [1, 2, 3]; total = total + value; end; disp(total); count = 0; for column = [1; 2; 3]; count = count + 1; disp(column); end; disp(count); for value = [7]; disp(value + 1); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["6", "[1; 2; 3]", "1", "8"]);
+    }
+
+    #[test]
+    fn evaluates_matrix_for_source_once_before_body_mutations() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; for column = A; disp(column); A(1, 1) = 99; A = [0]; end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1; 3]", "[2; 4]", "[0]"]);
+    }
+
+    #[test]
+    fn matrix_for_variable_can_replace_source_variable() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; for A = A; disp(A); end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1; 3]", "[2; 4]", "[2; 4]"]);
+    }
+
+    #[test]
+    fn matrix_for_columns_are_independent_mutable_values() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; for column = A; column(1, 1) = 99; disp(column); column = 0; end; disp(A); disp(column);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[99; 3]", "[99; 4]", "[1, 2; 3, 4]", "0"]);
+    }
+
+    #[test]
+    fn matrix_for_accepts_computed_sources() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; for column = A + A; disp(column); end; for value = transpose([1; 2; 3]); disp(value); end; for value = 2 + 3; disp(value); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[2; 6]", "[4; 8]", "1", "2", "3", "5"]);
+    }
+
+    #[test]
+    fn matrix_for_supports_break_and_continue_through_conditionals() {
+        let module = sun_parser::parse("for column = [1, 2, 3, 4; 10, 20, 30, 40]; if column(1, 1) == 2; continue; elseif column(1, 1) == 4; break; end; disp(sum(column)); end; disp(column);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["11", "33", "[4; 40]"]);
+    }
+
+    #[test]
+    fn nests_matrix_for_with_ranges_and_while() {
+        let module = sun_parser::parse("total = 0; for outer = [1, 2]; for inner = 1:3; total = total + outer * inner; end; while 1; for column = [1, 2; 3, 4]; break; end; break; end; end; disp(total); disp(column);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["18", "[1; 3]"]);
+    }
+
+    #[test]
+    fn scalar_for_consumes_loop_control_and_skips_remaining_statements() {
+        for keyword in ["break", "continue"] {
+            let source = format!("for value = 7; {keyword}; disp(undefined); end; disp(value);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["7"]);
+        }
+    }
+
+    #[test]
+    fn matrix_for_preserves_implicit_output_rules() {
+        let module = sun_parser::parse("for column = [1, 2; 3, 4]\n sum(column)\n sum(column);\nend;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["4", "6"]);
+    }
+
+    #[test]
+    fn matrix_for_does_not_apply_finite_range_restrictions_to_elements() {
+        let module = sun_parser::parse("count = 0; for value = [0 / 0, 1 / 0]; count = count + 1; end; for value = 0 / 0; count = count + 1; end; disp(count);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn matrix_for_reports_invalid_sources_and_propagates_errors() {
+        for source in ["for value = \"text\"; end", "for value = disp(1); end"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err().to_string();
+            assert!(error.contains("for source must be a number or matrix"));
+        }
+        for source in ["for column = undefined; end", "for column = [1, 2]; disp(undefined); end"] {
+            assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::UndefinedVariable(_))));
+        }
+        let module = sun_parser::parse("for column = []; end").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::Matrix(MatrixError::Empty))));
+    }
+
+    #[test]
+    fn runs_for_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/for.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Soma de 1 a 5:", "15", "Contagem regressiva:", "3", "2", "1",
+            "Passo fracionario:", "0", "0.1", "0.2", "0.3", "Soma com saltos:", "18", "Matriz preenchida:", "[11, 12, 13; 21, 22, 23]"]);
+    }
+
+    #[test]
+    fn executes_for_with_default_positive_and_negative_steps() {
+        let module = sun_parser::parse("for index = 1:3; disp(index); end; for index = 2:2:6; disp(index); end; for index = 3:-1:1; disp(index); end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "3", "2", "4", "6", "3", "2", "1", "1"]);
+    }
+
+    #[test]
+    fn evaluates_for_bounds_once_and_ignores_body_changes_to_index() {
+        let module = sun_parser::parse("first = 1; step = 1; last = 3; for index = first:step:last; disp(index); first = 9; step = -1; last = 0; index = 99; end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "3", "99"]);
+    }
+
+    #[test]
+    fn skips_empty_for_ranges_and_executes_singletons() {
+        let module = sun_parser::parse("index = 42; for index = 3:1; disp(undefined); end; for index = 1:-1:3; disp(undefined); end; disp(index); for index = 2:2; disp(index); end; for index = 2:-1:2; disp(index); end; for index = 0:1:1e-20; disp(index); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["42", "2", "2", "0"]);
+    }
+
+    #[test]
+    fn executes_fractional_for_ranges_without_losing_endpoints() {
+        for (source, expected) in [
+            ("for value = 0:0.1:0.3; disp(value); end", vec![0.0, 0.1, 0.2, 0.3]),
+            ("for value = 1:-0.2:0; disp(value); end", vec![1.0, 0.8, 0.6, 0.4, 0.2, 0.0]),
+            ("for value = 0:0.3:1; disp(value); end", vec![0.0, 0.3, 0.6, 0.9]),
+        ] {
+            let output = execute(&sun_parser::parse(source).unwrap()).unwrap();
+            assert_eq!(output.len(), expected.len());
+            for (actual, expected) in output.iter().zip(expected) {
+                assert!((actual.parse::<f64>().unwrap() - expected).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn for_break_and_continue_affect_only_the_innermost_loop() {
+        let module = sun_parser::parse("total = 0; for outer = 1:2; for inner = 1:5; if inner == 2; continue; elseif inner == 4; break; end; total = total + inner; end; disp(outer); end; disp(total);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "8"]);
+    }
+
+    #[test]
+    fn combines_for_and_while_with_loop_control() {
+        let module = sun_parser::parse("for outer = 1:2; while 1; break; end; disp(outer); end; counter = 0; while counter < 2; counter = counter + 1; for inner = 1:3; continue; end; disp(counter); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "1", "2"]);
+    }
+
+    #[test]
+    fn for_continue_advances_and_break_skips_the_rest_of_the_body() {
+        let module = sun_parser::parse("for index = 1:3; continue; disp(undefined); end; disp(index); for index = 1:3; break; disp(undefined); end; disp(index);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["3", "1"]);
+    }
+
+    #[test]
+    fn for_updates_matrices_and_preserves_implicit_output_rules() {
+        let module = sun_parser::parse("A = [0; 0; 0]; for index = 1:3\n A(index, 1) = index * index;\n value = index\nend; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["value = 1", "value = 2", "value = 3", "[1; 4; 9]"]);
+    }
+
+    #[test]
+    fn rejects_invalid_and_unrepresentable_for_ranges() {
+        for range in ["1:0:3", "3:0:1", "1:-0:3", "0:(1 / 0):3", "(0 / 0):1", "1:(1 / 0)",
+            "[1]:3", "1:[1]:3", "1:\"text\"", "disp(1):3", "0:1e-300:1", "0:1e-320:1e308",
+            "1e16:1:(1e16 + 2)", "9007199254740990:1:9007199254740994"] {
+            let source = format!("for index = {range}; end");
+            let module = sun_parser::parse(&source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::InvalidForRange(_))), "unexpected result for {range}");
+        }
+    }
+
+    #[test]
+    fn handles_large_finite_for_bounds_without_intermediate_overflow() {
+        let module = sun_parser::parse("for index = -1e308:1e308:1e308; disp(index / 1e308); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["-1", "0", "1"]);
+    }
+
+    #[test]
+    fn propagates_errors_from_for_bounds_and_bodies() {
+        for source in ["for index = undefined:3; end", "for index = 1:undefined:3; end", "for index = 1:undefined; end", "for index = 1:3; disp(undefined); end"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(_))));
+        }
+    }
+
+    #[test]
+    fn runs_control_flow_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/controle_fluxo.sun")).unwrap();
+        let output = execute(&module).unwrap();
+        assert_eq!(output.len(), 5);
+        assert_eq!(&output[..4], ["Temperatura elevada", "Soma com continue e break:", "18", "Raiz de 2:"]);
+        let approximation: f64 = output[4].parse().unwrap();
+        assert!((approximation - 2.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rejects_loop_control_in_direct_ast_outside_loops() {
+        for keyword in ["break", "continue"] {
+            let mut module = sun_parser::parse(&format!("while 1; {keyword}; end")).unwrap();
+            let StmtKind::While { body, .. } = module.statements.remove(0).kind else { panic!("expected while") };
+            let error = execute(&Module { statements: body }).unwrap_err().to_string();
+            assert!(error.contains(&format!("{keyword} is only valid inside a loop")));
+        }
+    }
+
+    #[test]
+    fn executes_only_the_first_matching_conditional_branch() {
+        for (source, expected) in [
+            ("if -2; disp(1); elseif undefined; disp(2); else; disp(3); end", "1"),
+            ("if 0; disp(undefined); elseif 0; disp(undefined); elseif 2; disp(2); elseif undefined; disp(4); else; disp(undefined); end", "2"),
+            ("if 0; disp(undefined); elseif 0; disp(undefined); else; disp(3); end", "3"),
+        ] {
+            let module = sun_parser::parse(source).unwrap();
+            assert_eq!(execute(&module).unwrap(), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn supports_empty_and_nested_conditionals_with_shared_variables() {
+        let module = sun_parser::parse("value = 1; if 0; disp(undefined); end; if 1; end; if 0; else; end; if value; if 0; else; value = 7; end; end; disp(value);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["7"]);
+    }
+
+    #[test]
+    fn preserves_implicit_output_inside_conditionals() {
+        let module = sun_parser::parse("if 1\n value = 3\n value; disp(value);\nend;\nif 1; disp(value); end").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["value = 3", "3", "3"]);
+    }
+
+    #[test]
+    fn rejects_invalid_conditions_in_if_and_elseif() {
+        for condition in ["[1]", "\"text\"", "1 / 0", "0 / 0", "disp(1)"] {
+            for source in [format!("if {condition}; end"), format!("if 0; elseif {condition}; end")] {
+                let module = sun_parser::parse(&source).unwrap();
+                assert!(execute(&module).unwrap_err().to_string().contains("if condition must be a finite scalar number"));
+            }
+        }
+    }
+
+    #[test]
+    fn short_circuits_logical_operators_and_normalizes_results() {
+        let module = sun_parser::parse("disp(0 && undefined); disp(1 || undefined); disp(0 && disp(9)); disp(1 || disp(9)); disp(2 && -3); disp(0 || -3); disp(1 && 0); disp(0 || 0); disp(0 || 1 && 0); if 0 && undefined; disp(9); elseif 1 || undefined; disp(7); end; while 0 && undefined; disp(9); end").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["0", "1", "0", "1", "1", "1", "0", "0", "0", "7"]);
+    }
+
+    #[test]
+    fn evaluates_required_logical_operands_and_rejects_invalid_types() {
+        for source in ["1 && undefined", "0 || undefined"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(_))));
+        }
+        for source in ["[1] && 0", "\"text\" || 1", "1 && [1]", "0 || (1 / 0)", "(0 / 0) && 0", "0 || disp(1)"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(execute(&module).unwrap_err().to_string().contains("logical operator condition must be a finite scalar number"));
+        }
+    }
+
+    #[test]
+    fn breaks_out_of_while_through_nested_conditionals() {
+        let module = sun_parser::parse("counter = 0; while counter < 5; counter = counter + 1; if counter == 3; if 1; break; end; end; disp(counter); end; disp(counter);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn continues_while_and_rechecks_the_condition() {
+        let module = sun_parser::parse("counter = 0; while counter < 4; counter = counter + 1; if counter == 2; continue; elseif counter == 4; if 1; continue; end; end; disp(counter); end; disp(counter);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "3", "4"]);
+    }
+
+    #[test]
+    fn loop_control_affects_only_the_innermost_loop() {
+        let module = sun_parser::parse("outer = 0; total = 0; while outer < 2; outer = outer + 1; inner = 0; while inner < 4; inner = inner + 1; if inner == 1; continue; elseif inner == 3; break; end; total = total + 1; end; disp(outer); end; disp(total);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "2"]);
+    }
+
+    #[test]
+    fn loop_control_skips_the_remaining_body() {
+        for source in ["while 1; break; disp(undefined); end; disp(1);", "counter = 1; while counter; counter = 0; continue; disp(undefined); end; disp(1);"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert_eq!(execute(&module).unwrap(), vec!["1"]);
+        }
+    }
+
+    #[test]
+    fn propagates_errors_from_selected_conditional_branches() {
+        for source in ["if undefined; end", "if 1; disp(undefined); end", "if 0; else; disp(undefined); end"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(_))));
+        }
+    }
+
+    #[test]
+    fn executes_while_and_preserves_updated_variables() {
+        let module = sun_parser::parse("counter = 1; total = 0; while counter <= 3\n disp(counter); total = total + counter; counter = counter + 1;\nend\ndisp(total); disp(counter);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "3", "6", "4"]);
+    }
+
+    #[test]
+    fn skips_while_body_when_condition_is_initially_false() {
+        let module = sun_parser::parse("while 0\n disp(undefined);\nend\nwhile 0; end; disp(42);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["42"]);
+    }
+
+    #[test]
+    fn executes_nested_while_blocks() {
+        let module = sun_parser::parse("outer = 1; total = 0; while outer <= 2; inner = 1; while inner <= 3; total = total + 1; inner = inner + 1; end; outer = outer + 1; end; disp(total);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["6"]);
+    }
+
+    #[test]
+    fn preserves_implicit_output_rules_inside_while() {
+        let module = sun_parser::parse("counter = 0; while counter < 2\n counter = counter + 1\n counter; disp(counter);\nend;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["counter = 1", "1", "counter = 2", "2"]);
+    }
+
+    #[test]
+    fn updates_matrices_and_accepts_nonzero_numeric_while_conditions() {
+        let module = sun_parser::parse("A = [0; 0]; counter = -2; while counter; A(counter + 3, 1) = counter; counter = counter + 1; end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[-2; -1]"]);
+    }
+
+    #[test]
+    fn rejects_non_scalar_and_non_finite_while_conditions() {
+        for condition in ["[1]", "\"text\"", "1 / 0", "0 / 0", "disp(1)"] {
+            let source = format!("while {condition}\nend");
+            let module = sun_parser::parse(&source).unwrap();
+            assert!(execute(&module).unwrap_err().to_string().contains("while condition must be a finite scalar number"));
+        }
+    }
+
+    #[test]
+    fn propagates_errors_from_while_conditions_and_bodies() {
+        for source in ["while undefined\nend", "while 1\n disp(undefined);\nend"] {
+            let module = sun_parser::parse(source).unwrap();
+            assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(_))));
+        }
+    }
+
+    #[test]
     fn evaluates_precedence_and_functions() {
         let module = sun_parser::parse("x = 2 + 3 * 4\ny = sqrt(x)").unwrap();
         let result = execute(&module).unwrap();
@@ -229,6 +1823,24 @@ mod tests {
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "B = [7, 10; 15, 22]");
         assert_eq!(result[2], "C = [1, 4; 9, 16]");
+    }
+
+    #[test]
+    fn evaluates_matrix_subtraction() {
+        let module = sun_parser::parse("A = [5, 2; 3, 8]; B = [1, 4; 6, 2]; disp(A - B); disp(B - A); disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[4, -2; -3, 6]", "[-4, 2; 3, -6]", "[5, 2; 3, 8]"]);
+    }
+
+    #[test]
+    fn evaluates_matrix_subtraction_with_broadcasting() {
+        let module = sun_parser::parse("A = [10, 20; 30, 40]; disp(A - [1, 2]); disp([1; 2] - A); disp([10; 20] - [1, 2]);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[9, 18; 29, 38]", "[-9, -19; -28, -38]", "[9, 8; 19, 18]"]);
+    }
+
+    #[test]
+    fn rejects_matrix_subtraction_with_incompatible_dimensions() {
+        let module = sun_parser::parse("[1, 2; 3, 4] - [1, 2, 3];").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::Matrix(MatrixError::IncompatibleDimensions))));
     }
 
     #[test]

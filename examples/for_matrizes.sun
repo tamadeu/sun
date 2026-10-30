@@ -1,0 +1,34 @@
+disp("Colunas da matriz:");
+A = [1, 2, 3; 10, 20, 30];
+total = 0;
+for coluna = A
+    disp(coluna);
+    total = total + sum(coluna);
+end
+disp("Soma de todos os elementos:");
+disp(total);
+
+disp("Vetor linha:");
+for valor = [5, 10, 15]
+    disp(valor);
+end
+
+disp("Vetor coluna:");
+for coluna = [5; 10; 15]
+    disp(coluna);
+end
+
+disp("Vetor coluna transposto:");
+for valor = transpose([5; 10; 15])
+    disp(valor);
+end
+
+disp("Somas por coluna com saltos:");
+for coluna = [1, 2, 3, 4; 10, 20, 30, 40]
+    if coluna(1, 1) == 2
+        continue;
+    elseif coluna(1, 1) == 4
+        break;
+    end
+    disp(sum(coluna));
+end

@@ -1,0 +1,168 @@
+
+% ============================================================
+% SUN - Simulacao de planejamento industrial
+% Teste de matrizes, algebra linear e calculos financeiros
+% ============================================================
+
+disp("========================================");
+disp("  SUN - ANALISE INDUSTRIAL");
+disp("========================================");
+
+% ------------------------------------------------------------
+% 1. Planejamento de producao
+% Cada linha representa um cenario.
+% Cada coluna representa um produto:
+% Produto 1, Produto 2 e Produto 3.
+% ------------------------------------------------------------
+
+planos = [120, 80, 50;
+    150, 60, 70;
+    100, 110, 90];
+
+disp("Planos de producao:");
+disp(planos);
+
+% ------------------------------------------------------------
+% 2. Precos e custos unitarios
+% Vetores coluna para os tres produtos.
+% ------------------------------------------------------------
+
+precos = [250;
+    180;
+    320];
+
+custos = [140;
+    100;
+    210];
+
+disp("Precos unitarios:");
+disp(precos);
+
+disp("Custos unitarios:");
+disp(custos);
+
+% ------------------------------------------------------------
+% 3. Analise financeira por cenario
+% Multiplicacao matricial: quantidade x preco.
+% ------------------------------------------------------------
+
+receita = planos * precos;
+custo_total = planos * custos;
+lucro = receita - custo_total;
+
+disp("Receita por cenario:");
+disp(receita);
+
+disp("Custo total por cenario:");
+disp(custo_total);
+
+disp("Lucro bruto por cenario:");
+disp(lucro);
+
+% ------------------------------------------------------------
+% 4. Margem de contribuicao por produto
+% ------------------------------------------------------------
+
+margem_unitaria = precos - custos;
+
+disp("Margem unitaria por produto:");
+disp(margem_unitaria);
+
+lucro_por_produto = planos .* planos;
+
+disp("Matriz de teste elemento a elemento:");
+disp(lucro_por_produto);
+
+% ------------------------------------------------------------
+% 5. Transposicao e produto matricial
+% ------------------------------------------------------------
+
+planos_transpostos = transpose(planos);
+
+disp("Planos transpostos:");
+disp(planos_transpostos);
+
+correlacao_operacional = planos_transpostos * planos;
+
+disp("Produto da matriz transposta pela original:");
+disp(correlacao_operacional);
+
+% ------------------------------------------------------------
+% 6. Sistema linear de planejamento
+%
+% 4x + y + 2z = 18
+%  x + 5y +  z = 24
+% 2x + y + 6z = 30
+%
+% Resolver A * quantidades = demanda.
+% ------------------------------------------------------------
+
+A = [4, 1, 2;
+    1, 5, 1;
+    2, 1, 6];
+
+demanda = [18;
+    24;
+    30];
+
+disp("Matriz do sistema linear:");
+disp(A);
+
+disp("Vetor de demanda:");
+disp(demanda);
+
+quantidades = solve(A, demanda);
+
+disp("Solucao do sistema linear:");
+disp(quantidades);
+
+% ------------------------------------------------------------
+% 7. Determinante e inversa
+% ------------------------------------------------------------
+
+determinante = det(A);
+
+disp("Determinante da matriz A:");
+disp(determinante);
+
+A_inversa = inv(A);
+
+disp("Matriz inversa de A:");
+disp(A_inversa);
+
+% ------------------------------------------------------------
+% 8. Validacao da solucao
+% O resultado deve ser proximo de um vetor de zeros.
+% ------------------------------------------------------------
+
+demanda_calculada = A * quantidades;
+residuo = demanda_calculada - demanda;
+
+disp("Demanda reconstruida:");
+disp(demanda_calculada);
+
+disp("Residuo da solucao:");
+disp(residuo);
+
+% ------------------------------------------------------------
+% 9. Validacao da inversa
+% A * inv(A) deve resultar na matriz identidade.
+% ------------------------------------------------------------
+
+identidade_calculada = A * A_inversa;
+
+disp("A multiplicada pela sua inversa:");
+disp(identidade_calculada);
+
+% ------------------------------------------------------------
+% 10. Operacoes elemento a elemento
+% ------------------------------------------------------------
+
+quadrados = planos .* planos;
+
+disp("Quadrados elemento a elemento:");
+disp(quadrados);
+
+disp("========================================");
+disp("  FIM DA ANALISE");
+disp("========================================");

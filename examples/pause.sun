@@ -1,0 +1,7 @@
+duracao = 0.1;
+disp("Inicio do processamento:");
+for etapa = 1:3
+    disp(etapa);
+    pause(duracao);
+end
+disp("Processamento concluido.");

@@ -4,7 +4,7 @@ members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/su
 default-members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-runtime", "crates/sun-codegen-llvm", "crates/sun-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/tamadeu/sun"

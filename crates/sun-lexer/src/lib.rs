@@ -6,6 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Number(f64), Ident(String), String(String),
+    While, End, If, Elseif, Else, Break, Continue, For, Switch, Case, Otherwise, Return, Try, Catch,
     Plus, Minus, Star, DotStar, Slash, DotSlash, Caret,
     Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
     Bang, AndAnd, OrOr,
@@ -48,7 +49,24 @@ impl Lexer<'_> {
                 'a'..='z' | 'A'..='Z' | '_' => {
                     self.bump();
                     while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') { self.bump(); }
-                    self.push(TokenKind::Ident(self.source[start..self.offset].to_string()), start);
+                    let kind = match &self.source[start..self.offset] {
+                        "while" => TokenKind::While,
+                        "end" => TokenKind::End,
+                        "if" => TokenKind::If,
+                        "elseif" => TokenKind::Elseif,
+                        "else" => TokenKind::Else,
+                        "break" => TokenKind::Break,
+                        "continue" => TokenKind::Continue,
+                        "for" => TokenKind::For,
+                        "switch" => TokenKind::Switch,
+                        "case" => TokenKind::Case,
+                        "otherwise" => TokenKind::Otherwise,
+                        "return" => TokenKind::Return,
+                        "try" => TokenKind::Try,
+                        "catch" => TokenKind::Catch,
+                        name => TokenKind::Ident(name.to_string()),
+                    };
+                    self.push(kind, start);
                 }
                 '"' | '\'' => self.string(start, ch)?,
                 '+' => { self.bump(); self.push(TokenKind::Plus, start); }
@@ -132,6 +150,57 @@ impl Lexer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_try_catch_without_matching_identifier_prefixes() {
+        let tokens = lex("try catch try_count catch_count Try Catch").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Try, TokenKind::Catch, TokenKind::Ident("try_count".into()),
+            TokenKind::Ident("catch_count".into()), TokenKind::Ident("Try".into()), TokenKind::Ident("Catch".into()), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn recognizes_return_without_matching_identifier_prefixes() {
+        let tokens = lex("return returned return_value Return").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Return, TokenKind::Ident("returned".into()),
+            TokenKind::Ident("return_value".into()), TokenKind::Ident("Return".into()), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn recognizes_switch_keywords_without_matching_identifier_prefixes() {
+        let tokens = lex("switch case otherwise switch_count case_count otherwise_value Switch").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Switch, TokenKind::Case, TokenKind::Otherwise,
+            TokenKind::Ident("switch_count".into()), TokenKind::Ident("case_count".into()),
+            TokenKind::Ident("otherwise_value".into()), TokenKind::Ident("Switch".into()), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn recognizes_for_without_matching_identifier_prefixes() {
+        let tokens = lex("for format for_count").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::For);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("format".into()));
+        assert_eq!(tokens[2].kind, TokenKind::Ident("for_count".into()));
+    }
+
+    #[test]
+    fn recognizes_conditional_and_loop_control_keywords() {
+        let tokens = lex("if elseif else break continue if_count elseif_count elsewhere breakpoint continued").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::If, TokenKind::Elseif, TokenKind::Else, TokenKind::Break, TokenKind::Continue,
+            TokenKind::Ident("if_count".into()), TokenKind::Ident("elseif_count".into()), TokenKind::Ident("elsewhere".into()),
+            TokenKind::Ident("breakpoint".into()), TokenKind::Ident("continued".into()), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn recognizes_while_keywords_without_matching_identifier_prefixes() {
+        let tokens = lex("while end while_count ending").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::While);
+        assert_eq!(tokens[1].kind, TokenKind::End);
+        assert_eq!(tokens[2].kind, TokenKind::Ident("while_count".into()));
+        assert_eq!(tokens[3].kind, TokenKind::Ident("ending".into()));
+    }
 
     #[test]
     fn lexes_numbers_identifiers_and_matrix_operators() {

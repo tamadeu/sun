@@ -1,0 +1,26 @@
+A = [11, 12, 13; 21, 22, 23];
+disp("Ordem linear por colunas:");
+for indice = 1:6
+    disp(A(indice));
+end
+
+disp("Ultimo elemento:");
+disp(A(end));
+
+disp("Penultimo elemento:");
+disp(A(end - 1));
+
+A(end) = 99;
+A(end - 1) = 88;
+disp("Apos atribuicoes lineares:");
+disp(A);
+
+B = [1, 2];
+disp("Indice aninhado:");
+disp(A(B(end) + end - 2));
+
+try
+    A(end + 1) = 0;
+catch erro
+    disp(erro.identifier);
+end

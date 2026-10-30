@@ -1,0 +1,23 @@
+A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34; 41, 42, 43, 44];
+
+disp("Linhas de 2 ate end:");
+disp(A(2:end, :));
+
+disp("Ultima coluna:");
+disp(A(:, end));
+
+disp("Ultima linha:");
+disp(A(end, :));
+
+disp("Linhas e colunas alternadas:");
+disp(A(1:2:end, 2:2:end));
+
+disp("Ordem invertida:");
+disp(A(end:-1:1, end:-2:1));
+
+copia = A(:, end);
+copia(1) = 99;
+disp("Copia independente:");
+disp(copia);
+disp("Valor original:");
+disp(A(1, end));

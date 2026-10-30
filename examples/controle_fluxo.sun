@@ -1,0 +1,40 @@
+temperatura = 85;
+if temperatura > 100
+    disp("Temperatura critica");
+elseif temperatura >= 80
+    disp("Temperatura elevada");
+else
+    disp("Temperatura normal");
+end
+
+contador = 0;
+total = 0;
+while contador < 10
+    contador = contador + 1;
+    if contador == 3
+        continue;
+    elseif contador == 7
+        break;
+    else
+        total = total + contador;
+    end
+end
+disp("Soma com continue e break:");
+disp(total);
+
+aproximacao = 1;
+iteracoes = 0;
+tolerancia = 1e-10;
+limite = 20;
+while 1
+    aproximacao = (aproximacao + 2 / aproximacao) / 2;
+    iteracoes = iteracoes + 1;
+    if abs(aproximacao * aproximacao - 2) < tolerancia
+        break;
+    elseif iteracoes >= limite
+        disp("Limite de iteracoes atingido");
+        break;
+    end
+end
+disp("Raiz de 2:");
+disp(aproximacao);

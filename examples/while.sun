@@ -1,0 +1,36 @@
+disp("Contagem de 1 a 5:");
+contador = 1;
+total = 0;
+while contador <= 5
+    disp(contador);
+    total = total + contador;
+    contador = contador + 1;
+end
+disp("Soma acumulada:");
+disp(total);
+
+while 0
+    disp("Esta mensagem nao deve aparecer.");
+end
+
+linha = 1;
+total_iteracoes = 0;
+while linha <= 2
+    coluna = 1;
+    while coluna <= 3
+        total_iteracoes = total_iteracoes + 1;
+        coluna = coluna + 1;
+    end
+    linha = linha + 1;
+end
+disp("Iteracoes dos loops aninhados:");
+disp(total_iteracoes);
+
+quadrados = [0; 0; 0; 0; 0];
+indice = 1;
+while indice <= 5
+    quadrados(indice, 1) = indice * indice;
+    indice = indice + 1;
+end
+disp("Quadrados de 1 a 5:");
+disp(quadrados);

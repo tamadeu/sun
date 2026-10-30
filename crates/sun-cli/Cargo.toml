@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+crossterm = "0.29"
 sun-lexer = { path = "../sun-lexer" }
 sun-parser = { path = "../sun-parser" }
 sun-runtime = { path = "../sun-runtime" }

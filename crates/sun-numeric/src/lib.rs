@@ -11,6 +11,8 @@ pub enum MatrixError {
     RaggedRows,
     #[error("matrix index ({row}, {col}) is out of bounds for shape {rows}x{cols}")]
     IndexOutOfBounds { row: usize, col: usize, rows: usize, cols: usize },
+    #[error("matrix linear index {index} is out of bounds for {elements} elements")]
+    LinearIndexOutOfBounds { index: usize, elements: usize },
     #[error("matrix dimensions are incompatible")]
     IncompatibleDimensions,
     #[error("matrix is singular and cannot be inverted or solved")]
@@ -33,6 +35,46 @@ impl SunMatrix {
     }
 
     pub fn shape(&self) -> (usize, usize) { (self.data.nrows(), self.data.ncols()) }
+
+    pub fn element_count(&self) -> usize { self.data.len() }
+
+    pub fn select(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<Self, MatrixError> {
+        if row_indices.is_empty() || column_indices.is_empty() { return Err(MatrixError::Empty); }
+        let (rows, cols) = self.shape();
+        for &row in row_indices {
+            if row == 0 || row > rows {
+                return Err(MatrixError::IndexOutOfBounds { row, col: column_indices[0], rows, cols });
+            }
+        }
+        for &col in column_indices {
+            if col == 0 || col > cols {
+                return Err(MatrixError::IndexOutOfBounds { row: row_indices[0], col, rows, cols });
+            }
+        }
+        let data = Array2::from_shape_fn((row_indices.len(), column_indices.len()), |(row, col)| {
+            self.data[(row_indices[row] - 1, column_indices[col] - 1)]
+        });
+        Ok(Self { data })
+    }
+
+    fn linear_coordinates(&self, index: usize) -> Result<(usize, usize), MatrixError> {
+        let elements = self.element_count();
+        if index == 0 || index > elements {
+            return Err(MatrixError::LinearIndexOutOfBounds { index, elements });
+        }
+        let rows = self.data.nrows();
+        Ok(((index - 1) % rows + 1, (index - 1) / rows + 1))
+    }
+
+    pub fn get_linear(&self, index: usize) -> Result<f64, MatrixError> {
+        let (row, col) = self.linear_coordinates(index)?;
+        self.get(row, col)
+    }
+
+    pub fn set_linear(&mut self, index: usize, value: f64) -> Result<(), MatrixError> {
+        let (row, col) = self.linear_coordinates(index)?;
+        self.set(row, col, value)
+    }
 
     /// Creates a read-only, zero-copy view over an inclusive 1-based rectangle.
     pub fn view(&self, row_start: usize, row_end: usize, col_start: usize, col_end: usize)
@@ -69,6 +111,10 @@ impl SunMatrix {
     /// Adds matrices using 2D singleton-dimension broadcasting.
     pub fn broadcast_add(&self, other: &Self) -> Result<Self, MatrixError> {
         self.broadcast_binary(other, |a, b| a + b)
+    }
+
+    pub fn broadcast_subtract(&self, other: &Self) -> Result<Self, MatrixError> {
+        self.broadcast_binary(other, |left, right| left - right)
     }
 
     /// Multiplies elements using 2D singleton-dimension broadcasting.
@@ -203,6 +249,52 @@ impl<'a> MatrixView<'a> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn selects_rows_and_columns_in_requested_order_without_aliasing() {
+        let matrix = SunMatrix::from_rows(vec![vec![11.0, 12.0, 13.0, 14.0], vec![21.0, 22.0, 23.0, 24.0], vec![31.0, 32.0, 33.0, 34.0]]).unwrap();
+        let mut selected = matrix.select(&[3, 1], &[4, 2]).unwrap();
+        assert_eq!(selected.shape(), (2, 2));
+        assert_eq!(selected.to_rows(), vec![vec![34.0, 32.0], vec![14.0, 12.0]]);
+        selected.set(1, 1, 99.0).unwrap();
+        assert_eq!(matrix.get(3, 4).unwrap(), 34.0);
+        assert_eq!(matrix.select(&[2], &[3]).unwrap().to_rows(), vec![vec![23.0]]);
+        assert_eq!(matrix.select(&[1, 2, 3], &[4]).unwrap().shape(), (3, 1));
+        assert_eq!(matrix.select(&[2], &[1, 2, 3, 4]).unwrap().shape(), (1, 4));
+    }
+
+    #[test]
+    fn selection_rejects_empty_and_out_of_bounds_axes() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        assert_eq!(matrix.select(&[], &[1]).unwrap_err(), MatrixError::Empty);
+        assert_eq!(matrix.select(&[1], &[]).unwrap_err(), MatrixError::Empty);
+        for (rows, cols) in [(vec![0], vec![1]), (vec![3], vec![1]), (vec![1], vec![0]), (vec![1], vec![3])] {
+            assert!(matches!(matrix.select(&rows, &cols), Err(MatrixError::IndexOutOfBounds { .. })));
+        }
+    }
+
+    #[test]
+    fn linear_indexing_reads_in_column_major_order() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        assert_eq!(matrix.element_count(), 6);
+        let values: Vec<_> = (1..=matrix.element_count()).map(|index| matrix.get_linear(index).unwrap()).collect();
+        assert_eq!(values, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn linear_indexing_writes_without_changing_shape() {
+        let mut matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        matrix.set_linear(2, 40.0).unwrap();
+        matrix.set_linear(5, 30.0).unwrap();
+        assert_eq!(matrix.shape(), (2, 3));
+        assert_eq!(matrix.to_rows(), vec![vec![1.0, 2.0, 30.0], vec![40.0, 5.0, 6.0]]);
+        for index in [0, 7, usize::MAX] {
+            let expected = MatrixError::LinearIndexOutOfBounds { index, elements: 6 };
+            assert_eq!(matrix.get_linear(index).unwrap_err(), expected);
+            assert_eq!(matrix.set_linear(index, 99.0).unwrap_err(), expected);
+        }
+        assert_eq!(matrix.to_rows(), vec![vec![1.0, 2.0, 30.0], vec![40.0, 5.0, 6.0]]);
+    }
 
     fn sample() -> SunMatrix {
         SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap()
