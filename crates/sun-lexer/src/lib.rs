@@ -138,7 +138,7 @@ mod tests {
     fn lexes_numbers_identifiers_and_matrix_operators() {
         let tokens = lex("A = 2.5 .* B;").unwrap();
         assert!(matches!(tokens[0].kind, TokenKind::Ident(ref name) if name == "A"));
-        assert!(matches!(tokens[2].kind, TokenKind::Number(n) if n == 2.5));
+        assert!(matches!(&tokens[2].kind, TokenKind::Number(n) if *n == 2.5));
         assert_eq!(tokens[3].kind, TokenKind::DotStar);
     }
 
@@ -146,6 +146,6 @@ mod tests {
     fn ignores_matlab_style_comments() {
         let tokens = lex("x = 1; % comment\ny = 2;").unwrap();
         assert!(tokens.iter().any(|token| token.kind == TokenKind::Newline));
-        assert_eq!(tokens.iter().filter(|token| matches!(token.kind, TokenKind::Ident(_))).count(), 2);
+        assert_eq!(tokens.iter().filter(|token| matches!(&token.kind, TokenKind::Ident(_))).count(), 2);
     }
 }
