@@ -176,7 +176,9 @@ pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
 #[cfg(test)]
 mod tests{
  use super::*;use sun_parser::parse;
- #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));assert!(ir.contains("call void @sun_matrix_free"));}
+ #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));assert!(ir.contains("call void @sun_runtime_check_matrix"));
+ assert!(ir.contains("call void @sun_runtime_cleanup"));}
+ #[test]fn matrix_aliases_and_reassignments_use_single_runtime_cleanup(){let ast=parse("A=[1,2;3,4]; B=A; A=A*A; disp(B); disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert_eq!(ir.matches("call void @sun_runtime_cleanup()").count(),1);assert!(ir.matches("call void @sun_runtime_check_matrix").count()>=2);}
  #[test]fn compiles_matrix_multiplication(){let ast=parse("A=[1,2;3,4]; B=A*A; disp(B);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_multiply"));}
  #[test]fn reads_matrix_elements_with_one_based_indices(){let ast=parse("A=[1,2;3,4]; disp(A(2,1));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get"));}
  #[test]fn compiles_indexed_matrix_assignment(){let ast=parse("A=[1,2;3,4]; i=2; j=1; A(i,j)=99; disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call void @sun_matrix_set_indexed"));assert!(ir.contains("call void @sun_matrix_print"));}
