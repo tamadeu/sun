@@ -3,11 +3,11 @@ The C runtime exposes an opaque heap-backed `SunMatrix`. Consumers must not depe
 
 - `sun_matrix_create(rows, cols)`, `sun_matrix_free(matrix)`
 - `sun_matrix_rows(matrix)`, `sun_matrix_cols(matrix)`
-- `sun_matrix_get(matrix, row, col, &status)`, `sun_matrix_set(matrix, row, col, value)`
+- `sun_matrix_get(matrix, row, col, &status)`, `sun_matrix_get_indexed(matrix, row, col)`, `sun_matrix_set(matrix, row, col, value)`
 - `sun_matrix_add(a, b)`, `sun_matrix_element_multiply(a, b)`, `sun_matrix_multiply(a, b)`
 - `sun_matrix_scale(matrix, scalar)`, `sun_matrix_divide_scalar(matrix, scalar)`
 - `sun_matrix_print(matrix)`
 
-Indices at the ABI boundary are 1-based. Accessors return status codes for null and out-of-range access. Constructors and operations return an owned matrix or NULL for invalid shapes, division by zero, or allocation failure. The caller owns every returned matrix.
+Indices at the ABI boundary are 1-based. The low-level integer accessor returns status codes for null and out-of-range access. `sun_matrix_get_indexed` accepts numeric indices, validates that both are finite positive integers within the matrix shape, and terminates the native program with a diagnostic on invalid input. Constructors and operations return an owned matrix or NULL for invalid shapes, division by zero, or allocation failure. The caller owns every returned matrix.
 
-The LLVM generator has not yet migrated to this ABI; that integration is a separate next step. The C interface is independently compiled and exercised in CI.
+The LLVM generator uses this ABI for matrix creation, arithmetic, display, and indexing. Literal indices are checked at compile time; variable and computed indices are validated by `sun_matrix_get_indexed` at runtime.
