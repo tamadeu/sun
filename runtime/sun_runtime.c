@@ -24,6 +24,18 @@ double sun_matrix_get(const SunMatrix*m,size_t r,size_t c,int*status){
  else if(!r||!c||r>m->rows||c>m->cols)s=SUN_MATRIX_ERR_BOUNDS;
  else v=m->data[(r-1)*m->cols+c-1];if(status)*status=s;return v;
 }
+double sun_matrix_get_indexed(const SunMatrix*m,double row,double col){
+ if(!m){fprintf(stderr,"Sun runtime error: indexing a null matrix\\n");exit(EXIT_FAILURE);}
+ if(!isfinite(row)||floor(row)!=row||row<1.0||row>(double)m->rows){
+  fprintf(stderr,"Sun runtime error: row index must be an integer in [1, %zu], got %g\\n",m->rows,row);
+  exit(EXIT_FAILURE);
+ }
+ if(!isfinite(col)||floor(col)!=col||col<1.0||col>(double)m->cols){
+  fprintf(stderr,"Sun runtime error: column index must be an integer in [1, %zu], got %g\\n",m->cols,col);
+  exit(EXIT_FAILURE);
+ }
+ return m->data[((size_t)row-1)*m->cols+((size_t)col-1)];
+}
 SunMatrix *sun_matrix_add(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->rows!=b->rows||a->cols!=b->cols)return NULL;
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
