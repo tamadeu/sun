@@ -10,7 +10,7 @@ source -> lexer -> parser -> AST -> LLVM IR -> native executable
 
 Semantic analysis and a stable Sun IR remain planned layers between the AST and LLVM.
 
-The initial native backend lowers fixed-shape dense matrices directly to stack-allocated contiguous `double` buffers and unrolls matrix operations at compile time. This is intentionally simple. A later stable runtime ABI should own dynamic allocation, bounds checks, and optimized matrix kernels.
+The native backend lowers fixed-shape dense matrices to stack-allocated contiguous `double` buffers. Native scalar math calls cross a small C ABI bundled into each executable (`runtime/sun_runtime.c`). The ABI currently exposes `sqrt`, `sin`, `cos`, `exp`, and `log`; matrix ownership and kernels are still compiler-managed and will migrate to the ABI in a later milestone.
 
 ## Initial decisions
 
@@ -19,7 +19,7 @@ The initial native backend lowers fixed-shape dense matrices directly to stack-a
 - Public matrix indexing is 1-based.
 - LLVM is the native backend; the CLI invokes Clang 18+ to compile generated LLVM IR.
 - The interpreter supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, 1-based matrix reads via `A(row, column)`, and basic math functions.
-- The initial LLVM backend supports scalar arithmetic and fixed-shape dense matrix literals/operations, matrix display, and compile-time literal 1-based matrix reads.
+- The LLVM backend supports scalar arithmetic, fixed-shape dense matrix literals/operations, matrix display, compile-time literal 1-based matrix reads, and native math calls through the C runtime ABI.
 - A trailing semicolon suppresses the implicit result; `disp(...)` still writes output.
 - MATLAB-style comments begin with %.
 
@@ -39,7 +39,7 @@ The initial native backend lowers fixed-shape dense matrices directly to stack-a
 4. Semantic analysis and a stable Sun IR.
 5. LLVM scalar expressions and native executable generation.
 6. LLVM fixed-shape matrix code generation, matrix operations, display, and 1-based literal indexing.
-7. Matrix element assignment, dynamic indexing, runtime ABI, optimized kernels, functions, control flow, JIT, and plotting.
+7. Initial native C runtime ABI for math functions and self-contained executable linking.\n8. Heap-backed matrices, runtime matrix operations/indexing, element assignment, optimized kernels, user functions, control flow, JIT, and plotting.
 
 ## LLVM prerequisites
 

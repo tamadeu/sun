@@ -40,3 +40,10 @@ jobs:
           SUN
           cargo run -p sun -- compile /tmp/native-matrices.sun -o /tmp/native-matrices
           test "$(/tmp/native-matrices)" = "$(printf '7 10 \n15 22 \n1 4 \n9 16 \n3')"
+
+      - name: Compile and execute native math functions through the runtime ABI
+        run: |
+          printf 'x = sqrt(81);\ny = sin(0);\nz = log(exp(2));\ndisp(x);\ndisp(y);\ndisp(z);\n' > /tmp/native-runtime.sun
+          cargo run -p sun -- compile /tmp/native-runtime.sun -o /tmp/native-runtime
+          test "$(/tmp/native-runtime)" = "$(printf '9\n0\n2')"
+          clang-18 -std=c11 -Wall -Wextra -Werror -c runtime/sun_runtime.c -o /tmp/sun_runtime.o

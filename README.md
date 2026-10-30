@@ -2,7 +2,7 @@
 
 Sun is an experimental scientific programming language inspired by MATLAB, written in Rust. It is designed around matrix-first computing, 1-based public indexing, and a planned LLVM native backend.
 
-## Install a released binary
+Native compilation bundles a small C runtime ABI (`runtime/sun_runtime.c`) into each executable. The first ABI functions provide `sqrt`, `sin`, `cos`, `exp`, and `log`; matrix allocation and runtime indexing will move behind this boundary in a subsequent milestone.\n\n## Install a released binary
 
 Linux (x86-64) and macOS (Apple Silicon or Intel):
 
