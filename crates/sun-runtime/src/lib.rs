@@ -184,6 +184,13 @@ fn call(name: &str, args: Vec<Value>, output: &mut Vec<String>) -> Result<Value,
         output.push(args[0].to_string());
         return Ok(Value::Void);
     }
+    if name == "solve" {
+        if args.len() != 2 { return Err(RuntimeError::Arity(name.into(), "two matrix arguments: solve(A, B)".into())); }
+        return match (&args[0], &args[1]) {
+            (Value::Matrix(a), Value::Matrix(b)) => Ok(Value::Matrix(a.solve(b)?)),
+            _ => Err(RuntimeError::Unsupported("solve expects two matrices".into())),
+        };
+    }
     if args.len() != 1 { return Err(RuntimeError::Arity(name.into(), "one argument".into())); }
     let arg = args.into_iter().next().unwrap();
     match (name, arg) {
@@ -195,8 +202,11 @@ fn call(name: &str, args: Vec<Value>, output: &mut Vec<String>) -> Result<Value,
         ("exp", Value::Number(n)) => Ok(Value::Number(n.exp())),
         ("log", Value::Number(n)) => Ok(Value::Number(n.ln())),
         ("sum", Value::Matrix(m)) => Ok(Value::Number(m.to_rows().iter().flatten().copied().sum())),
+        ("transpose", Value::Matrix(m)) => Ok(Value::Matrix(m.transpose()?)),
+        ("det", Value::Matrix(m)) => Ok(Value::Number(m.determinant()?)),
+        ("inv", Value::Matrix(m)) => Ok(Value::Matrix(m.inverse()?)),
         ("sum", Value::Number(n)) => Ok(Value::Number(n)),
-        (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum") =>
+        (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum" | "transpose" | "det" | "inv" | "solve") =>
             Err(RuntimeError::Unsupported(format!("unknown function '{unknown}'"))),
         (known, value) => Err(RuntimeError::Unsupported(format!("function '{known}' does not support {value}"))),
     }
@@ -219,6 +229,22 @@ mod tests {
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "B = [7, 10; 15, 22]");
         assert_eq!(result[2], "C = [1, 4; 9, 16]");
+    }
+
+    #[test]
+    fn evaluates_linear_algebra_functions() {
+        let module = sun_parser::parse("A = [4, 7; 2, 6];\nT = transpose(A);\nd = det(A);\nI = inv(A);\nX = solve(A, [1; 0]);").unwrap();
+        let result = execute(&module).unwrap();
+        assert_eq!(result[1], "T = [4, 2; 7, 6]");
+        assert_eq!(result[2], "d = 10");
+        assert_eq!(result[3], "I = [0.6, -0.7; -0.2, 0.4]");
+        assert_eq!(result[4], "X = [0.6; -0.2]");
+    }
+
+    #[test]
+    fn reports_singular_matrix_for_inverse() {
+        let module = sun_parser::parse("A = [1, 2; 2, 4]; B = inv(A);").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("singular"));
     }
 
     #[test]
