@@ -4,6 +4,7 @@
 #include <stdlib.h>
 typedef struct SunMatrix { size_t rows, cols; double *data; struct SunMatrix *next_owned; } SunMatrix;
 static SunMatrix *sun_owned_matrices = NULL;
+void sun_runtime_cleanup(void);
 
 static void sun_runtime_fail(const char *message) {
  sun_runtime_cleanup();
@@ -42,27 +43,21 @@ double sun_matrix_get(const SunMatrix*m,size_t r,size_t c,int*status){
  else if(!r||!c||r>m->rows||c>m->cols)s=SUN_MATRIX_ERR_BOUNDS;
  else v=m->data[(r-1)*m->cols+c-1];if(status)*status=s;return v;
 }
-void sun_matrix_set_indexed(SunMatrix*m,double row,double col,double value){
- if(!m){fprintf(stderr,"Sun runtime error: assigning into a null matrix\n");exit(EXIT_FAILURE);}
- if(!isfinite(row)||floor(row)!=row||row<1.0||row>(double)m->rows){
-  fprintf(stderr,"Sun runtime error: row index must be an integer in [1, %zu], got %g\n",m->rows,row);exit(EXIT_FAILURE);
- }
- if(!isfinite(col)||floor(col)!=col||col<1.0||col>(double)m->cols){
-  fprintf(stderr,"Sun runtime error: column index must be an integer in [1, %zu], got %g\n",m->cols,col);exit(EXIT_FAILURE);
- }
- m->data[((size_t)row-1)*m->cols+((size_t)col-1)]=value;
+void sun_matrix_set_indexed(SunMatrix *m, double row, double col, double value) {
+ if (!m) sun_runtime_fail("assigning into a null matrix");
+ if (!isfinite(row) || floor(row) != row || row < 1.0 || row > (double)m->rows)
+  sun_runtime_fail("row index is not a finite in-bounds positive integer");
+ if (!isfinite(col) || floor(col) != col || col < 1.0 || col > (double)m->cols)
+  sun_runtime_fail("column index is not a finite in-bounds positive integer");
+ m->data[((size_t)row - 1) * m->cols + ((size_t)col - 1)] = value;
 }
-double sun_matrix_get_indexed(const SunMatrix*m,double row,double col){
- if(!m){fprintf(stderr,"Sun runtime error: indexing a null matrix\\n");exit(EXIT_FAILURE);}
- if(!isfinite(row)||floor(row)!=row||row<1.0||row>(double)m->rows){
-  fprintf(stderr,"Sun runtime error: row index must be an integer in [1, %zu], got %g\\n",m->rows,row);
-  exit(EXIT_FAILURE);
- }
- if(!isfinite(col)||floor(col)!=col||col<1.0||col>(double)m->cols){
-  fprintf(stderr,"Sun runtime error: column index must be an integer in [1, %zu], got %g\\n",m->cols,col);
-  exit(EXIT_FAILURE);
- }
- return m->data[((size_t)row-1)*m->cols+((size_t)col-1)];
+double sun_matrix_get_indexed(const SunMatrix *m, double row, double col) {
+ if (!m) sun_runtime_fail("indexing a null matrix");
+ if (!isfinite(row) || floor(row) != row || row < 1.0 || row > (double)m->rows)
+  sun_runtime_fail("row index is not a finite in-bounds positive integer");
+ if (!isfinite(col) || floor(col) != col || col < 1.0 || col > (double)m->cols)
+  sun_runtime_fail("column index is not a finite in-bounds positive integer");
+ return m->data[((size_t)row - 1) * m->cols + ((size_t)col - 1)];
 }
 SunMatrix *sun_matrix_add(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->rows!=b->rows||a->cols!=b->cols)return NULL;
