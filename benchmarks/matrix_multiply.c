@@ -73,7 +73,7 @@ int main(int argc,char **argv) {
  unsigned repetitions=3;
  if(argc>1) repetitions=(unsigned)strtoul(argv[1],NULL,10);
  if(repetitions==0) repetitions=1;
- const size_t sizes[]={64,128,256,512};
+ const size_t sizes[]={31,32,33,64,128,256,512};
  for(size_t i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++)
   if(!run_case(sizes[i],repetitions)) { sun_runtime_cleanup(); return EXIT_FAILURE; }
  sun_runtime_cleanup();
