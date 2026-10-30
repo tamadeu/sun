@@ -67,3 +67,8 @@ jobs:
         run: |
           clang-18 -O3 -std=c11 -Wall -Wextra benchmarks/matrix_multiply.c -lm -o /tmp/sun-matrix-bench
           /tmp/sun-matrix-bench 1
+
+      - name: Build and run elementwise SIMD kernel benchmark
+        run: |
+          clang-18 -O3 -std=c11 -Wall -Wextra -Werror benchmarks/elementwise_kernels.c -lm -o /tmp/sun-elementwise-bench
+          /tmp/sun-elementwise-bench 1

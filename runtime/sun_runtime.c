@@ -59,15 +59,27 @@ double sun_matrix_get_indexed(const SunMatrix *m, double row, double col) {
   sun_runtime_fail("column index is not a finite in-bounds positive integer");
  return m->data[((size_t)row - 1) * m->cols + ((size_t)col - 1)];
 }
+/* Independent, contiguous buffers and an explicit SIMD loop contract allow
+ * optimizing compilers to emit vector instructions without changing the ABI. */
 SunMatrix *sun_matrix_add(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->rows!=b->rows||a->cols!=b->cols)return NULL;
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]+b->data[i];return o;
+ const size_t count=a->rows*a->cols;
+ const double * restrict lhs=a->data, * restrict rhs=b->data;
+ double * restrict dst=o->data;
+ #pragma omp simd
+ for(size_t i=0;i<count;i++)dst[i]=lhs[i]+rhs[i];
+ return o;
 }
 SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
  if(!a||!b||a->rows!=b->rows||a->cols!=b->cols)return NULL;
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]*b->data[i];return o;
+ const size_t count=a->rows*a->cols;
+ const double * restrict lhs=a->data, * restrict rhs=b->data;
+ double * restrict dst=o->data;
+ #pragma omp simd
+ for(size_t i=0;i<count;i++)dst[i]=lhs[i]*rhs[i];
+ return o;
 }
 
 /* Cache-blocked row-major matrix multiplication. The inner j loop walks
@@ -98,12 +110,24 @@ SunMatrix *sun_matrix_multiply(const SunMatrix*a,const SunMatrix*b){
  return o;
 }
 SunMatrix *sun_matrix_scale(const SunMatrix*a,double x){
- if(!a)return NULL;SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]*x;return o;
+ if(!a)return NULL;
+ SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
+ const size_t count=a->rows*a->cols;
+ const double * restrict src=a->data;
+ double * restrict dst=o->data;
+ #pragma omp simd
+ for(size_t i=0;i<count;i++)dst[i]=src[i]*x;
+ return o;
 }
 SunMatrix *sun_matrix_divide_scalar(const SunMatrix*a,double x){
- if(!a||x==0.0)return NULL;SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]/x;return o;
+ if(!a||x==0.0)return NULL;
+ SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
+ const size_t count=a->rows*a->cols;
+ const double * restrict src=a->data;
+ double * restrict dst=o->data;
+ #pragma omp simd
+ for(size_t i=0;i<count;i++)dst[i]=src[i]/x;
+ return o;
 }
 void sun_matrix_print(const SunMatrix*m){
  if(!m){puts("<null matrix>");return;}for(size_t r=0;r<m->rows;r++){
