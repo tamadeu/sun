@@ -25,7 +25,7 @@ jobs:
           cargo run -p sun -- run examples/matrices.sun
       - name: Compile and execute a native scalar program
         run: |
-          printf 'x = 2 + 3 * 4;\\ndisp(x);\\n' > /tmp/native-scalar.sun
+          printf 'x = 2 + 3 * 4;\ndisp(x);\n' > /tmp/native-scalar.sun
           cargo run -p sun -- compile /tmp/native-scalar.sun -o /tmp/native-scalar
           test "$(/tmp/native-scalar)" = "14"
       - name: Compile and execute native matrix operations and indexing
@@ -39,4 +39,4 @@ jobs:
           disp(A(2, 1));
           SUN
           cargo run -p sun -- compile /tmp/native-matrices.sun -o /tmp/native-matrices
-          test "$(/tmp/native-matrices)" = "$(printf '7 10 \\n15 22 \\n1 4 \\n9 16 \\n3')"
+          test "$(/tmp/native-matrices)" = "$(printf '7 10 \n15 22 \n1 4 \n9 16 \n3')"
