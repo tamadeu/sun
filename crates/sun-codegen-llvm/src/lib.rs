@@ -90,49 +90,42 @@ impl Generator {
     }
     fn binary(&mut self,a:NativeValue,op:BinaryOp,b:NativeValue)->Result<NativeValue,BackendError>{
         use BinaryOp::*;
-        match(a,b){
-            (NativeValue::Scalar(x),NativeValue::Scalar(y))=>{
-                let instruction=match op{Add=>"fadd",Subtract=>"fsub",Multiply|ElementMultiply=>"fmul",Divide|ElementDivide=>"fdiv",Power=>return Err(BackendError::Unsupported("power operator".into())),_=>return Err(BackendError::Unsupported(format!("operator {op:?}")))};
-                let r=self.value();self.emit(format!("{r} = {instruction} double {x}, {y}"));Ok(NativeValue::Scalar(r))
+        match (a,b) {
+            (NativeValue::Scalar(x),NativeValue::Scalar(y)) => {
+                let instruction=match op {
+                    Add=>"fadd", Subtract=>"fsub", Multiply|ElementMultiply=>"fmul",
+                    Divide|ElementDivide=>"fdiv",
+                    Power=>return Err(BackendError::Unsupported("power operator".into())),
+                    _=>return Err(BackendError::Unsupported(format!("operator {op:?}"))),
+                };
+                let r=self.value(); self.emit(format!("{r} = {instruction} double {x}, {y}"));
+                Ok(NativeValue::Scalar(r))
             }
-            (NativeValue::Matrix{pointer:a,rows:ar,cols:ac},NativeValue::Matrix{pointer:b,rows:br,cols:bc})=>{
-                let (function, rows, cols)=match op {
-                    Add|ElementMultiply=>{
-                        if ar!=br||ac!=bc{return Err(BackendError::IncompatibleDimensions(if op==Add{"matrix addition"}else{"element-wise multiplication"}));}
-                        (if op==Add{"sun_matrix_add"}else{"sun_matrix_element_multiply"},ar,ac)
+            (NativeValue::Matrix{pointer:a,rows:ar,cols:ac},NativeValue::Matrix{pointer:b,rows:br,cols:bc}) => {
+                let (function,rows,cols)=match op {
+                    Add|ElementMultiply => {
+                        if ar!=br||ac!=bc { return Err(BackendError::IncompatibleDimensions(if op==Add {"matrix addition"} else {"element-wise multiplication"})); }
+                        (if op==Add {"sun_matrix_add"} else {"sun_matrix_element_multiply"},ar,ac)
                     }
-                    Multiply=>{
-                        if ac!=br{return Err(BackendError::IncompatibleDimensions("matrix multiplication"));}
+                    Multiply => {
+                        if ac!=br { return Err(BackendError::IncompatibleDimensions("matrix multiplication")); }
                         ("sun_matrix_multiply",ar,bc)
                     }
                     _=>return Err(BackendError::Unsupported(format!("matrix operator {op:?}"))),
                 };
-                let out=self.value();self.emit(format!("{out} = call ptr @{function}(ptr {a}, ptr {b})"));
+                let out=self.value(); self.emit(format!("{out} = call ptr @{function}(ptr {a}, ptr {b})"));
                 self.owned_matrices.push(out.clone());
                 Ok(NativeValue::Matrix{pointer:out,rows,cols})
             }
             (NativeValue::Matrix{pointer,rows,cols},NativeValue::Scalar(s))|
-            (NativeValue::Scalar(s),NativeValue::Matrix{pointer,rows,cols}) if matches!(op,Multiply|ElementMultiply)=>{
-                let out=self.value();self.emit(format!("{out} = call ptr @sun_matrix_scale(ptr {pointer}, double {s})"));
+            (NativeValue::Scalar(s),NativeValue::Matrix{pointer,rows,cols}) if matches!(op,Multiply|ElementMultiply) => {
+                let out=self.value(); self.emit(format!("{out} = call ptr @sun_matrix_scale(ptr {pointer}, double {s})"));
                 self.owned_matrices.push(out.clone());
                 Ok(NativeValue::Matrix{pointer:out,rows,cols})
             }
-            (NativeValue::Matrix{pointer,rows,cols},NativeValue::Scalar(s)) if matches!(op,Divide|ElementDivide)=>{
-                let out=self.value();self.emit(format!("{out} = call ptr @sun_matrix_divide_scalar(ptr {pointer}, double {s})"));
+            (NativeValue::Matrix{pointer,rows,cols},NativeValue::Scalar(s)) if matches!(op,Divide|ElementDivide) => {
+                let out=self.value(); self.emit(format!("{out} = call ptr @sun_matrix_divide_scalar(ptr {pointer}, double {s})"));
                 self.owned_matrices.push(out.clone());
-                Ok(NativeValue::Matrix{pointer:out,rows,cols})
-            }
-            _=>Err(BackendError::Unsupported(format!("matrix operator {op:?}"))),
-                }
-            }
-            (NativeValue::Matrix{pointer,rows,cols},NativeValue::Scalar(s))|(NativeValue::Scalar(s),NativeValue::Matrix{pointer,rows,cols}) if matches!(op,Multiply|ElementMultiply)=>{
-                let out=self.value();self.emit(format!("{out} = alloca double, i64 {}, align 8",rows*cols));
-                for i in 0..rows*cols{let x=self.load(&pointer,i);let z=self.value();self.emit(format!("{z} = fmul double {x}, {s}"));self.store(&out,i,&z);}
-                Ok(NativeValue::Matrix{pointer:out,rows,cols})
-            }
-            (NativeValue::Matrix{pointer,rows,cols},NativeValue::Scalar(s)) if matches!(op,Divide|ElementDivide)=>{
-                let out=self.value();self.emit(format!("{out} = alloca double, i64 {}, align 8",rows*cols));
-                for i in 0..rows*cols{let x=self.load(&pointer,i);let z=self.value();self.emit(format!("{z} = fdiv double {x}, {s}"));self.store(&out,i,&z);}
                 Ok(NativeValue::Matrix{pointer:out,rows,cols})
             }
             _=>Err(BackendError::Unsupported(format!("operator {op:?} for these operand types"))),
@@ -155,15 +148,15 @@ pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
     }}
     let mut ir=String::from("; Generated by Sun\n@.sun_fmt = private unnamed_addr constant [4 x i8] c\"%g\\0A\\00\"\n@.sun_cell = private unnamed_addr constant [4 x i8] c\"%g \\00\"\ndeclare i32 @printf(ptr, ...)\ndeclare i32 @putchar(i32)\ndeclare double @sun_rt_sqrt(double)\ndeclare double @sun_rt_sin(double)\ndeclare double @sun_rt_cos(double)\ndeclare double @sun_rt_exp(double)\ndeclare double @sun_rt_log(double)\ndeclare ptr @sun_matrix_create(i64, i64)\ndeclare void @sun_matrix_free(ptr)\ndeclare i32 @sun_matrix_set(ptr, i64, i64, double)\ndeclare double @sun_matrix_get(ptr, i64, i64, ptr)\ndeclare ptr @sun_matrix_add(ptr, ptr)\ndeclare ptr @sun_matrix_element_multiply(ptr, ptr)\ndeclare ptr @sun_matrix_multiply(ptr, ptr)\ndeclare ptr @sun_matrix_scale(ptr, double)\ndeclare ptr @sun_matrix_divide_scalar(ptr, double)\ndeclare void @sun_matrix_print(ptr)\n\ndefine i32 @main() {\nentry:\n");
     for line in g.body{ir.push_str(&line);ir.push('\n');}
-    for pointer in g.owned_matrices.iter().rev(){ir.push_str(&format!("  call void @sun_matrix_free(ptr {pointer})\\n"));}
-    ir.push_str("  ret i32 0\\n}\\n");Ok(ir)
+    for pointer in g.owned_matrices.iter().rev(){ir.push_str(&format!("  call void @sun_matrix_free(ptr {pointer})\n"));}
+    ir.push_str("  ret i32 0\n}\n");Ok(ir)
 }
 #[cfg(test)]
 mod tests{
  use super::*;use sun_parser::parse;
- #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("alloca double, i64 4"));assert!(ir.contains("@.sun_cell"));}
- #[test]fn compiles_matrix_multiplication(){let ast=parse("A=[1,2;3,4]; B=A*A; disp(B);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("fadd double"));assert!(ir.contains("fmul double"));}
- #[test]fn reads_matrix_elements_with_one_based_indices(){let ast=parse("A=[1,2;3,4]; disp(A(2,1));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("load double"));}
+ #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));}
+ #[test]fn compiles_matrix_multiplication(){let ast=parse("A=[1,2;3,4]; B=A*A; disp(B);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_multiply"));}
+ #[test]fn reads_matrix_elements_with_one_based_indices(){let ast=parse("A=[1,2;3,4]; disp(A(2,1));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get"));}
  #[test]fn lowers_math_functions_through_the_runtime_abi(){let ast=parse("x=sqrt(81); y=sin(0);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_rt_sqrt"));assert!(ir.contains("call double @sun_rt_sin"));}
  #[test]fn rejects_zero_based_index(){let ast=parse("A=[1,2;3,4]; disp(A(0,1));").unwrap();assert!(compile_to_llvm_ir(&ast).unwrap_err().to_string().contains("1-based"));}
 }
