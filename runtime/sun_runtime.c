@@ -2,7 +2,25 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-typedef struct SunMatrix { size_t rows, cols; double *data; } SunMatrix;
+typedef struct SunMatrix { size_t rows, cols; double *data; struct SunMatrix *next_owned; } SunMatrix;
+static SunMatrix *sun_owned_matrices = NULL;
+
+static void sun_runtime_fail(const char *message) {
+ sun_runtime_cleanup();
+ fprintf(stderr, "Sun runtime error: %s\\n", message);
+ exit(EXIT_FAILURE);
+}
+void sun_runtime_cleanup(void) {
+ while (sun_owned_matrices) {
+  SunMatrix *matrix = sun_owned_matrices;
+  sun_owned_matrices = matrix->next_owned;
+  free(matrix->data);
+  free(matrix);
+ }
+}
+void sun_runtime_check_matrix(SunMatrix *matrix) {
+ if (!matrix) sun_runtime_fail("matrix allocation or operation failed");
+}
 enum { SUN_MATRIX_OK=0, SUN_MATRIX_ERR_NULL=1, SUN_MATRIX_ERR_BOUNDS=2 };
 double sun_rt_sqrt(double x){return sqrt(x);} double sun_rt_sin(double x){return sin(x);}
 double sun_rt_cos(double x){return cos(x);} double sun_rt_exp(double x){return exp(x);}
@@ -10,9 +28,9 @@ double sun_rt_log(double x){return log(x);} void sun_rt_print_f64(double x){prin
 SunMatrix *sun_matrix_create(size_t r,size_t c){
  if(!r||!c||r>SIZE_MAX/c||r*c>SIZE_MAX/sizeof(double))return NULL;
  SunMatrix*m=malloc(sizeof(*m));if(!m)return NULL;m->data=calloc(r*c,sizeof(double));
- if(!m->data){free(m);return NULL;}m->rows=r;m->cols=c;return m;
+ if(!m->data){free(m);return NULL;}m->rows=r;m->cols=c;m->next_owned=sun_owned_matrices;sun_owned_matrices=m;return m;
 }
-void sun_matrix_free(SunMatrix*m){if(m){free(m->data);free(m);}}
+void sun_matrix_free(SunMatrix*m){if(m){SunMatrix **link=&sun_owned_matrices;while(*link&&*link!=m)link=&(*link)->next_owned;if(*link==m)*link=m->next_owned;free(m->data);free(m);}}
 size_t sun_matrix_rows(const SunMatrix*m){return m?m->rows:0;}
 size_t sun_matrix_cols(const SunMatrix*m){return m?m->cols:0;}
 int sun_matrix_set(SunMatrix*m,size_t r,size_t c,double v){
