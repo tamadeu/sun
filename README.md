@@ -50,7 +50,7 @@ sun lex hello.sun
 sun repl
 ```
 
-The current `sun run` command uses the built-in interpreter. `sun compile` is reserved for native executable generation and intentionally reports that it is not available until LLVM code generation is implemented. The initial runtime supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, and a small set of math functions.
+The `sun run` command executes programs with the built-in interpreter. `sun compile` generates native executables through LLVM/Clang. Native compilation currently supports scalar arithmetic, dense matrix literals, matrix addition, matrix multiplication, element-wise multiplication, scalar multiplication/division, `disp(...)`, and 1-based matrix reads using `A(row, column)`. Native indices must currently be non-negative integer literals; matrix element assignment and general math functions are not yet supported by the native backend. The interpreter supports a broader set of runtime operations.
 
 ## Build from source
 
@@ -76,6 +76,6 @@ Pushing a version tag such as `v0.1.0` runs tests, builds release binaries for L
 
 ## Current status
 
-This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives, and interpreter are in progress. Semantic analysis, a stable intermediate representation, native LLVM code generation, a production-quality persistent REPL, and plotting are future milestones.
+This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives, interpreter, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, matrix element assignment, dynamic native indexing, a production-quality persistent REPL, and plotting remain future milestones.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design notes.
