@@ -8,3 +8,6 @@ license.workspace = true
 sun-ast = { path = "../sun-ast" }
 sun-numeric = { path = "../sun-numeric" }
 thiserror.workspace = true
+
+[dev-dependencies]
+sun-parser = { path = "../sun-parser" }
