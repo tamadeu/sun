@@ -16,6 +16,7 @@ pub struct Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
     Assign { name: String, value: Expr },
+    IndexAssign { name: String, row: Expr, col: Expr, value: Expr },
     Expr(Expr),
 }
 
