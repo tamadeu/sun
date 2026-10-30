@@ -8,12 +8,10 @@ ARCH="$(uname -m)"
 
 case "$OS/$ARCH" in
   Linux/x86_64) ASSET="sun-linux-x86_64.tar.gz" ;;
-  Darwin/arm64|Darwin/aarch64) ASSET="sun-macos-aarch64.tar.gz" ;;
-  Darwin/x86_64) ASSET="sun-macos-x86_64.tar.gz" ;;
   *)
     echo "Unsupported platform: $OS/$ARCH" >&2
-    echo "Supported: Linux x86_64, macOS Apple Silicon and Intel." >&2
-    echo "Windows users: see install.ps1 in the repository." >&2
+    echo "Prebuilt releases currently support Linux x86_64 only." >&2
+    echo "For macOS or Windows, build from source: https://github.com/$REPO#build-from-source" >&2
     exit 1
     ;;
 esac
@@ -29,8 +27,7 @@ fi
 
 echo "Downloading Sun ($ASSET)..."
 if ! curl --fail --location --silent --show-error "$URL" -o "$TMP_DIR/sun.tar.gz"; then
-  echo "Could not download a Sun release. The project may not have published its first release yet." >&2
-  echo "Check https://github.com/$REPO/releases" >&2
+  echo "Could not download a Sun release. Check https://github.com/$REPO/releases" >&2
   exit 1
 fi
 
