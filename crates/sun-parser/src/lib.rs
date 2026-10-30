@@ -69,7 +69,7 @@ impl Parser {
         };
 
         loop {
-            if matches!(self.peek().kind, TokenKind::LeftParen) {
+            if matches!(&self.peek().kind, TokenKind::LeftParen) {
                 if 15 < min_bp { break; }
                 self.advance();
                 let mut arguments = Vec::new();
@@ -166,13 +166,13 @@ mod tests {
         let StmtKind::Assign { name, value } = &module.statements[0].kind else { panic!("expected assignment") };
         assert_eq!(name, "x");
         let ExprKind::Binary { op: BinaryOp::Add, right, .. } = &value.kind else { panic!("expected addition at root") };
-        assert!(matches!(right.kind, ExprKind::Binary { op: BinaryOp::Multiply, .. }));
+        assert!(matches!(&right.kind, ExprKind::Binary { op: BinaryOp::Multiply, .. }));
     }
 
     #[test]
     fn parses_matrix_literal() {
         let module = parse("A = [1, 2; 3, 4];").unwrap();
         let StmtKind::Assign { value, .. } = &module.statements[0].kind else { panic!("expected assignment") };
-        assert!(matches!(value.kind, ExprKind::Matrix(ref rows) if rows.len() == 2 && rows[0].len() == 2));
+        assert!(matches!(&value.kind, ExprKind::Matrix(rows) if rows.len() == 2 && rows[0].len() == 2));
     }
 }
