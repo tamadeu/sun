@@ -13,6 +13,8 @@ pub enum MatrixError {
     IndexOutOfBounds { row: usize, col: usize, rows: usize, cols: usize },
     #[error("matrix dimensions are incompatible")]
     IncompatibleDimensions,
+    #[error("matrix is singular and cannot be inverted or solved")]
+    SingularMatrix,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +111,64 @@ impl SunMatrix {
         Ok(Self { data: self.data.dot(&other.data) })
     }
 
+    /// Returns a materialized transpose (distinct from the zero-copy MatrixView transpose).
+    pub fn transpose(&self) -> Result<Self, MatrixError> {
+        let (rows, cols) = self.shape();
+        let mut out = vec![vec![0.0; rows]; cols];
+        for r in 0..rows { for c in 0..cols { out[c][r] = self.data[(r, c)]; } }
+        Self::from_rows(out)
+    }
+
+    /// Computes the determinant using Gaussian elimination with partial pivoting.
+    pub fn determinant(&self) -> Result<f64, MatrixError> {
+        let (rows, cols) = self.shape();
+        if rows != cols { return Err(MatrixError::IncompatibleDimensions); }
+        let mut a = self.to_rows();
+        let mut det = 1.0;
+        for col in 0..rows {
+            let pivot = (col..rows).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs())).unwrap();
+            if a[pivot][col].abs() <= f64::EPSILON { return Ok(0.0); }
+            if pivot != col { a.swap(pivot, col); det = -det; }
+            let p = a[col][col]; det *= p;
+            for row in (col + 1)..rows {
+                let factor = a[row][col] / p;
+                for j in (col + 1)..rows { a[row][j] -= factor * a[col][j]; }
+            }
+        }
+        Ok(det)
+    }
+
+    /// Solves A X = B using Gaussian elimination with partial pivoting.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, MatrixError> {
+        let (n, cols) = self.shape();
+        let (rhs_rows, rhs_cols) = rhs.shape();
+        if n != cols || rhs_rows != n { return Err(MatrixError::IncompatibleDimensions); }
+        let mut a = self.to_rows();
+        let mut b = rhs.to_rows();
+        for col in 0..n {
+            let pivot = (col..n).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs())).unwrap();
+            if a[pivot][col].abs() <= f64::EPSILON { return Err(MatrixError::SingularMatrix); }
+            if pivot != col { a.swap(pivot, col); b.swap(pivot, col); }
+            let p = a[col][col];
+            for j in col..n { a[col][j] /= p; }
+            for j in 0..rhs_cols { b[col][j] /= p; }
+            for row in 0..n {
+                if row == col { continue; }
+                let factor = a[row][col];
+                for j in col..n { a[row][j] -= factor * a[col][j]; }
+                for j in 0..rhs_cols { b[row][j] -= factor * b[col][j]; }
+            }
+        }
+        Self::from_rows(b)
+    }
+
+    pub fn inverse(&self) -> Result<Self, MatrixError> {
+        let (n, cols) = self.shape();
+        if n != cols { return Err(MatrixError::IncompatibleDimensions); }
+        let identity = Self::from_rows((0..n).map(|r| (0..n).map(|c| if r == c { 1.0 } else { 0.0 }).collect()).collect())?;
+        self.solve(&identity)
+    }
+
     pub fn to_rows(&self) -> Vec<Vec<f64>> {
         self.data.rows().into_iter().map(|row| row.to_vec()).collect()
     }
@@ -187,6 +247,27 @@ mod tests {
     #[test]
     fn multiplies_matrices() {
         assert_eq!(sample().matmul(&sample()).unwrap().to_rows(), vec![vec![7.0, 10.0], vec![15.0, 22.0]]);
+    }
+
+    #[test]
+    fn computes_transpose_determinant_inverse_and_linear_solution() {
+        let a = SunMatrix::from_rows(vec![vec![4.0, 7.0], vec![2.0, 6.0]]).unwrap();
+        assert_eq!(a.transpose().unwrap().to_rows(), vec![vec![4.0, 2.0], vec![7.0, 6.0]]);
+        assert_abs_diff_eq!(a.determinant().unwrap(), 10.0);
+        let inv = a.inverse().unwrap();
+        assert_abs_diff_eq!(inv.get(1, 1).unwrap(), 0.6);
+        assert_abs_diff_eq!(inv.get(1, 2).unwrap(), -0.7);
+        let rhs = SunMatrix::from_rows(vec![vec![1.0], vec![0.0]]).unwrap();
+        let x = a.solve(&rhs).unwrap();
+        assert_abs_diff_eq!(x.get(1, 1).unwrap(), 0.6);
+        assert_abs_diff_eq!(x.get(2, 1).unwrap(), -0.2);
+    }
+
+    #[test]
+    fn rejects_singular_and_non_square_linear_algebra_inputs() {
+        let singular = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 4.0]]).unwrap();
+        assert_eq!(singular.inverse().unwrap_err(), MatrixError::SingularMatrix);
+        assert_eq!(SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0]]).unwrap().determinant().unwrap_err(), MatrixError::IncompatibleDimensions);
     }
 
     #[test]
