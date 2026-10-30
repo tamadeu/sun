@@ -23,11 +23,11 @@ int main(void){
  assert(s&&h&&d&&q);assert(fabs(sun_matrix_get(s,2,3,&st)-7)<1e-12);
  assert(fabs(sun_matrix_get(h,2,3,&st)-6)<1e-12);assert(fabs(sun_matrix_get(d,2,3,&st)-12)<1e-12);
  assert(fabs(sun_matrix_get(q,2,3,&st)-3)<1e-12);
- sun_matrix_set_indexed(a,2.0,3.0,42.0);assert(fabs(sun_matrix_get(a,2,3,&st)-42.0)<1e-12&&st==0);
  SunMatrix*x=sun_matrix_create(3,2);assert(x);
  for(size_t r=1;r<=3;r++)for(size_t c=1;c<=2;c++)assert(!sun_matrix_set(x,r,c,1));
  SunMatrix*p=sun_matrix_multiply(a,x);assert(p&&sun_matrix_rows(p)==2&&sun_matrix_cols(p)==2);
  assert(fabs(sun_matrix_get(p,2,2,&st)-15)<1e-12);
+ sun_matrix_set_indexed(a,2.0,3.0,42.0);assert(fabs(sun_matrix_get(a,2,3,&st)-42.0)<1e-12&&st==0);
  assert(!sun_matrix_create(0,2)&&!sun_matrix_divide_scalar(a,0));
  sun_matrix_free(p);sun_matrix_free(x);sun_matrix_free(q);sun_matrix_free(d);sun_matrix_free(h);sun_matrix_free(s);sun_matrix_free(b);sun_matrix_free(a);
  puts("matrix runtime ABI OK");return 0;
