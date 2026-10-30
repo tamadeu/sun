@@ -44,12 +44,14 @@ static int run_case(size_t n, unsigned repetitions) {
   fprintf(stderr,"correctness failure n=%zu max_error=%.3e\\n",n,max_error);
   return 0;
  }
+ double blocked_total=0.0;
  for(unsigned r=0;r<repetitions;r++) {
   sun_matrix_free(optimized);
   start=now_seconds();
   optimized=sun_matrix_multiply(a,b);
   double elapsed=now_seconds()-start;
   if(!optimized) return 0;
+  blocked_total+=elapsed;
   printf("kernel=blocked n=%zu repetition=%u seconds=%.6f gflops=%.3f\\n",
    n,r+1,elapsed,(2.0*(double)n*(double)n*(double)n)/(elapsed*1e9));
  }
@@ -61,10 +63,9 @@ static int run_case(size_t n, unsigned repetitions) {
   sun_matrix_free(tmp);
  }
  double baseline_seconds=(now_seconds()-start)/(double)repetitions;
- printf("summary n=%zu baseline_naive_seconds=%.6f blocked_last_checksum=%.12g max_abs_error=%.3e\\n",
-  n,reference_seconds,checksum(optimized),max_error);
- printf("comparison n=%zu baseline_avg_seconds=%.6f blocked_avg_seconds=see_kernel_lines\\n",
-  n,baseline_seconds);
+ double blocked_seconds=blocked_total/(double)repetitions;
+ printf("summary n=%zu baseline_avg_seconds=%.6f blocked_avg_seconds=%.6f speedup=%.3fx checksum=%.12g max_abs_error=%.3e\\n",
+  n,baseline_seconds,blocked_seconds,baseline_seconds/blocked_seconds,checksum(optimized),max_error);
  sun_matrix_free(a);sun_matrix_free(b);sun_matrix_free(reference);sun_matrix_free(optimized);
  return 1;
 }
