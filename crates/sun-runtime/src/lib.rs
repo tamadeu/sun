@@ -162,9 +162,9 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
             Ok(Value::Number(result))
         }
         (Value::Matrix(a), Value::Matrix(b)) => match op {
-            Add => Ok(Value::Matrix(a.add(&b)?)),
+            Add => Ok(Value::Matrix(a.broadcast_add(&b)?)),
             Multiply => Ok(Value::Matrix(a.matmul(&b)?)),
-            ElementMultiply => Ok(Value::Matrix(a.elementwise_mul(&b)?)),
+            ElementMultiply => Ok(Value::Matrix(a.broadcast_elementwise_mul(&b)?)),
             _ => Err(RuntimeError::Unsupported(format!("matrix operator {op:?}"))),
         },
         (Value::Matrix(a), Value::Number(b)) if matches!(op, Multiply | ElementMultiply) => Ok(Value::Matrix(matrix_map(&a, |x| x * b)?)),
