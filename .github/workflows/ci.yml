@@ -13,7 +13,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test frontend and numeric crates
+      - name: Test language frontend and runtime
         run: cargo test
-      - name: Check example syntax
-        run: cargo run -p sun -- check examples/matrices.sun
+      - name: Check and run the matrix example
+        run: |
+          cargo run -p sun -- check examples/matrices.sun
+          cargo run -p sun -- run examples/matrices.sun

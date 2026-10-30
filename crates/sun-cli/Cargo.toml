@@ -12,3 +12,4 @@ path = "src/main.rs"
 clap.workspace = true
 sun-lexer = { path = "../sun-lexer" }
 sun-parser = { path = "../sun-parser" }
+sun-runtime = { path = "../sun-runtime" }

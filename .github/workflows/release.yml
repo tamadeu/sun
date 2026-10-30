@@ -1,0 +1,93 @@
+name: Release binaries
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test language frontend and runtime
+        run: cargo test
+      - name: Smoke-test the CLI
+        run: |
+          cargo run -p sun -- check examples/matrices.sun
+          cargo run -p sun -- run examples/matrices.sun
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            asset: sun-linux-x86_64.tar.gz
+          - os: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+            runner: macos-14
+            asset: sun-macos-aarch64.tar.gz
+          - os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-13
+            asset: sun-macos-x86_64.tar.gz
+          - os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: sun-windows-x86_64.zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Sun
+        run: cargo build --release -p sun --target ${{ matrix.target }}
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp "target/${{ matrix.target }}/release/sun" dist/stage/sun
+          tar -czf "dist/${{ matrix.asset }}" -C dist/stage sun
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/sun.exe" "dist/sun.exe"
+          Compress-Archive -Path "dist/sun.exe" -DestinationPath "dist/${{ matrix.asset }}"
+          Remove-Item "dist/sun.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
