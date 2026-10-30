@@ -11,11 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test language frontend and runtime
+      - name: Test language frontend, runtime, and LLVM backend
         run: cargo test
       - name: Check and run the matrix example
         run: |
           cargo run -p sun -- check examples/matrices.sun
           cargo run -p sun -- run examples/matrices.sun
+      - name: Compile and execute a native Sun program
+        run: |
+          printf 'x = 2 + 3 * 4;\ndisp(x);\n' > /tmp/native-smoke.sun
+          cargo run -p sun -- compile /tmp/native-smoke.sun -o /tmp/native-smoke
+          test "$(/tmp/native-smoke)" = "14"
