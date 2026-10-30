@@ -47,3 +47,8 @@ jobs:
           cargo run -p sun -- compile /tmp/native-runtime.sun -o /tmp/native-runtime
           test "$(/tmp/native-runtime)" = "$(printf '9\n0\n2')"
           clang-18 -std=c11 -Wall -Wextra -Werror -c runtime/sun_runtime.c -o /tmp/sun_runtime.o
+
+      - name: Build and test the heap-backed matrix runtime ABI
+        run: |
+          clang-18 -std=c11 -Wall -Wextra tests/matrix_runtime_abi.c runtime/sun_runtime.c -lm -o /tmp/sun-matrix-runtime-test
+          test "$(/tmp/sun-matrix-runtime-test)" = "matrix runtime ABI OK"
