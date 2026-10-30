@@ -131,8 +131,6 @@ impl Generator {
             _=>Err(BackendError::Unsupported(format!("operator {op:?} for these operand types"))),
         }
     }
-    fn load(&mut self,p:&str,i:usize)->String{let slot=self.value();self.emit(format!("{slot} = getelementptr inbounds double, ptr {p}, i64 {i}"));let v=self.value();self.emit(format!("{v} = load double, ptr {slot}, align 8"));v}
-    fn store(&mut self,p:&str,i:usize,v:&str){let slot=self.value();self.emit(format!("{slot} = getelementptr inbounds double, ptr {p}, i64 {i}"));self.emit(format!("store double {v}, ptr {slot}, align 8"));}
     fn print(&mut self,v:&NativeValue){
         match v{
             NativeValue::Scalar(n)=>self.emit(format!("call i32 (ptr, ...) @printf(ptr @.sun_fmt, double {n})")),
