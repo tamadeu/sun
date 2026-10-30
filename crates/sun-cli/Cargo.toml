@@ -13,3 +13,4 @@ clap.workspace = true
 sun-lexer = { path = "../sun-lexer" }
 sun-parser = { path = "../sun-parser" }
 sun-runtime = { path = "../sun-runtime" }
+sun-codegen-llvm = { path = "../sun-codegen-llvm" }
