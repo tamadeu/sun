@@ -10,7 +10,7 @@ source -> lexer -> parser -> AST -> LLVM IR -> native executable
 
 Semantic analysis and a stable Sun IR remain planned layers between the AST and LLVM.
 
-The native backend lowers fixed-shape dense matrices to stack-allocated contiguous `double` buffers. Native scalar math calls cross a small C ABI bundled into each executable (`runtime/sun_runtime.c`). The ABI currently exposes `sqrt`, `sin`, `cos`, `exp`, and `log`; matrix ownership and kernels are still compiler-managed and will migrate to the ABI in a later milestone.
+Native scalar math calls cross a C ABI bundled into each executable (`runtime/sun_runtime.c`). The runtime now also provides an opaque heap-backed `SunMatrix` ABI with 1-based access, shape queries, arithmetic operations, and explicit ownership. The LLVM generator still emits stack-backed matrices; migrating generated code to the matrix ABI is the next compiler milestone.
 
 ## Initial decisions
 
