@@ -5,8 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
-    Number(f64), Ident(String), String(String),
-    ParFor,
+    Number(f64), Bool(bool), Ident(String), String(String),
+    ParFor, Function,
     While, End, If, Elseif, Else, Break, Continue, For, Switch, Case, Otherwise, Return, Try, Catch,
     Plus, Minus, Star, DotStar, Slash, DotSlash, Caret,
     Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
@@ -26,6 +26,22 @@ pub enum LexError {
     UnterminatedString { offset: usize },
     #[error("invalid number starting at byte {offset}")]
     InvalidNumber { offset: usize },
+}
+
+#[test]
+fn recognizes_function_keyword() {
+    let tokens = lex("function functional").unwrap();
+    assert_eq!(tokens[0].kind, TokenKind::Function);
+    assert_eq!(tokens[1].kind, TokenKind::Ident("functional".into()));
+}
+
+#[test]
+fn recognizes_boolean_literals_without_reserving_prefixes() {
+    let tokens = lex("true false true_value falsehood").unwrap();
+    assert_eq!(tokens[0].kind, TokenKind::Bool(true));
+    assert_eq!(tokens[1].kind, TokenKind::Bool(false));
+    assert_eq!(tokens[2].kind, TokenKind::Ident("true_value".into()));
+    assert_eq!(tokens[3].kind, TokenKind::Ident("falsehood".into()));
 }
 
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
@@ -51,6 +67,9 @@ impl Lexer<'_> {
                     self.bump();
                     while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') { self.bump(); }
                     let kind = match &self.source[start..self.offset] {
+                        "true" => TokenKind::Bool(true),
+                        "false" => TokenKind::Bool(false),
+                        "function" => TokenKind::Function,
                         "while" => TokenKind::While,
                         "end" => TokenKind::End,
                         "if" => TokenKind::If,

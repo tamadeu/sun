@@ -82,8 +82,8 @@ cargo run -p sun -- check examples/while.sun
 cargo run -p sun -- run examples/while.sun
 ```
 
-Use source files for multiline blocks; the current REPL only reads one line at
-a time. `sun compile` does not support loops yet.
+The REPL accepts multiline blocks, showing `...>` until the block is complete.
+`sun compile` does not support loops yet.
 There is no iteration limit: ensure that the condition eventually becomes false
 or the body executes `break`, or interrupt an infinite loop with Ctrl+C.
 
@@ -114,11 +114,12 @@ Both statements are rejected outside loops during `sun check`, even in branches
 that would never execute. They take no arguments. Semicolons inside branches
 control implicit output independently of any semicolon after `end`.
 
-As with `while`, conditions must be finite scalar numbers, not matrices or
+As with `while`, conditions must be booleans or finite scalar numbers, not matrices or
 strings. This is currently a subset of MATLAB's condition semantics. The
 operators `&&` and `||` short-circuit: the right operand is evaluated only when
-needed, and evaluated operands must be finite scalar numbers. Results are `0`
-or `1`. These rules also apply outside conditional headers.
+needed, and evaluated operands must be booleans or finite scalar numbers.
+Comparisons and logical operators return real booleans, displayed as `true`
+or `false`. These rules also apply outside conditional headers.
 
 `if`, `elseif`, `else`, `break`, and `continue` are reserved keywords. Headers
 must end with a newline or semicolon, including `else`. Native compilation of
@@ -166,8 +167,9 @@ steps too small to produce distinct iteration values, report a runtime error.
 `for` is a reserved keyword. Every block needs `end`, and the header must end
 with a newline or semicolon.
 
-Ranges are supported only in `for` headers, not general expressions such as
-`values = 1:5`. Native compilation of `for` remains future work.
+Outside loop headers, ranges such as `values = 1:5` materialize row vectors.
+Loop-header ranges retain lazy generation. Native compilation of ranges and
+`for` remains future work.
 
 ```sh
 cargo run -p sun -- check examples/for.sun
@@ -275,9 +277,10 @@ branch has no effect.
 `return` is a reserved keyword and must be followed by a newline, semicolon,
 or the end of the file. `return 42` and `return()` are not supported. Source
 after a return must still be syntactically valid: the whole script is parsed
-before execution. Use `sun run` for these scripts; the current REPL replays
-accumulated source and does not yet provide proper script-call boundaries.
-User-defined functions and native compilation of `return` remain future work.
+before execution. In the REPL and Studio console, `return` ends only the current
+command, preserving the session for subsequent commands.
+Functions consume `return` at the current call boundary. Native compilation of
+`return` remains future work.
 
 ```sh
 cargo run -p sun -- check examples/return.sun
@@ -421,8 +424,8 @@ The existing `execute(module)` API still collects output and performs timed
 pauses. Enabled interactive pauses require a host implementing `wait_for_input`;
 the default implementation reports `Sun:IOError` rather than blocking.
 
-Use script files for this feature: the current REPL still replays accumulated
-source. Native pause compilation is not implemented yet. `pause` is a built-in
+The REPL executes each completed command once; earlier pauses and output are
+not replayed. Native pause compilation is not implemented yet. `pause` is a built-in
 function, not a reserved keyword.
 
 ```sh
@@ -446,11 +449,12 @@ disp("Press a key to continue");
 pause;
 ```
 
-Each execution starts with pauses enabled (`"on"`). `pause("off")` disables
+Each new session starts with pauses enabled (`"on"`). `pause("off")` disables
 both timed and interactive waits; `pause("on")` re-enables them. Both return
 the previous state, so it can be saved and restored. `pause("query")` returns
 the current state without changing it. All blocks and handlers share that
-state within a script; separate calls to the executor reset it. State calls
+state within a script. REPL and Studio commands retain it until the session is
+cleared; standalone executor calls start fresh. State calls
 follow normal implicit-output rules, so use `;` when discarding their result.
 States are case-sensitive, and arguments are still validated when pauses are
 disabled. Use the parenthesized string forms, not command syntax `pause off`.
@@ -539,8 +543,9 @@ context; its own matrix accesses establish the appropriate dimensions.
 Indices must be finite positive integers and must not exceed the element
 count. Out-of-range access raises `Sun:IndexOutOfBounds`. Writes require an
 existing matrix and a numeric scalar value. They preserve the matrix shape:
-`A(end + 1) = value` does not append an element. Vector or
-logical-array indices, deletion, matrix growth and native linear indexing are
+`A(end + 1) = value` does not append an element. Numeric vector indices are
+supported, including stored intervals and expressions returning vectors.
+Logical-array indices, deletion, matrix growth and native linear indexing are
 not implemented yet. Ordinary named function calls keep their existing meaning.
 
 ```sh
@@ -580,9 +585,9 @@ copies: modifying a variable holding a slice does not modify the source.
 
 Bidimensional slice assignments are also supported, as described below.
 Linear slices such as `A(:)` and `A(2:end)` are also supported, as described
-below. Vector/logical indexing and native slice compilation are not implemented.
-Ranges and `:` are direct matrix-index syntax, not general
-expression values. Empty selections preserve their axis dimensions, as
+below. Numeric vector indexing is also supported; logical indexing and native
+slice compilation are not implemented. Ranges are general expression values,
+while bare `:` remains direct matrix-index syntax. Empty selections preserve their axis dimensions, as
 described below. Fractional range
 components are not accepted, even when a particular progression could yield
 only integer indices.
@@ -665,8 +670,8 @@ integer steps are supported without growing or reshaping the target.
 
 The existing slice restrictions still apply: components must be finite
 integers, step must be nonzero, and selected indices must be positive and in bounds.
-Empty selections are valid matrix values. Vector/logical indices, deletion,
-growth, general colon expressions outside matrix arguments, and native linear
+Empty selections are valid matrix values. Logical indices, deletion,
+growth and native linear
 slice compilation remain unsupported.
 
 ```sh
@@ -689,10 +694,10 @@ disp(isempty(no_rows));
 disp(numel(no_columns));
 ```
 
-This prints `[0, 3]`, `[2, 0]`, `1`, and `0`. `size(value)` returns a two-element
+This prints `[0, 3]`, `[2, 0]`, `true`, and `0`. `size(value)` returns a two-element
 row matrix containing rows and columns. `numel(value)` returns the element
-count, and `isempty(value)` returns numeric `1` if there are no elements, else
-`0`. These initial forms accept exactly one numeric scalar or matrix argument;
+count, and `isempty(value)` returns boolean `true` if there are no elements, else
+`false`. These initial forms accept exactly one boolean, numeric scalar or matrix argument;
 a scalar has size `[1, 1]` and one element. Dimension-specific size queries,
 multiple outputs, and string/object queries are not implemented.
 
@@ -704,7 +709,7 @@ equations or zero RHS columns returns the correctly shaped empty result.
 Incompatible dimensions remain errors.
 
 Every zero-element source skips a `for` body, including `0xN` sources, and
-leaves an existing loop variable unchanged. Conditions still require finite
+leaves an existing loop variable unchanged. Conditions require booleans or finite
 scalar numbers: use `if isempty(value)` rather than a matrix condition.
 `end` on a zero-length axis evaluates to zero, so scalar indexing such as
 `empty(end)` is invalid. `empty(:)` is `0x1`; range slices preserve the existing
@@ -784,8 +789,8 @@ output matrices unchanged. Earlier script effects are not rolled back, and
 when several workers fail the selected error is not guaranteed to be the first
 one in sequential iteration order. Staging and input snapshots require extra
 memory. Native compilation, reduction variables, sliced-output blocks and
-MATLAB worker-limit syntax remain future work. Use script files rather than
-the current replaying REPL.
+MATLAB worker-limit syntax remain future work. Both script files and completed
+REPL blocks execute without replaying previous commands.
 
 ```sh
 cargo run -p sun -- check examples/parfor.sun
@@ -816,6 +821,258 @@ Pushing a version tag such as `v0.1.0` runs tests and builds release binaries fo
 
 ## Current status
 
-This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives, interpreter, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, matrix element assignment, dynamic native indexing, a production-quality persistent REPL, and plotting remain future milestones.
+This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives and assignment, interpreter, user-defined functions, persistent REPL, numeric CSV, initial 2D plotting in Studio, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, dynamic native indexing, and richer graphics remain future milestones.
+
+### 2D figures
+
+Run plotting source in Sun Studio, or embed a `RuntimeHost` with figure support:
+
+```matlab
+x = 0:0.1:6;
+plot(x, sin(x));
+title("Seno");
+xlabel("Tempo (s)");
+ylabel("Amplitude");
+legend("Seno");
+grid(true);
+axis([0, 6, -1.2, 1.2]);
+```
+
+`plot(x,y)` accepts equal-length nonempty numeric vectors (row or column), or
+two numeric scalars. With a nonvector matrix `y`, each column is a curve and
+its row count must match the vector `x`. For example:
+
+```matlab
+curvas = [transpose(sin(x)), transpose(cos(x))];
+plot(x, curvas);
+legend("Seno", "Cosseno");
+```
+
+Rust validates coordinates, dimensions and commands, retains one active figure
+in the session, and emits typed figure events. Studio renders these events with
+locally bundled Plotly.js; it does not evaluate Sun source or recreate language
+semantics in JavaScript. Actual curve data is separate from the bounded
+Workspace previews and is not silently truncated. The initial limits are 16
+curves and 10,000 total points per figure. NaN/infinite coordinates become gaps;
+every curve must retain at least one finite coordinate pair. Labels are plain
+strings limited to 512 UTF-8 bytes and are escaped for display.
+
+`title`, `xlabel` and `ylabel` each accept one string after a figure exists.
+`legend` accepts one string per curve, or `"on"`/`"off"` to show/hide it.
+`grid(true)` / `grid(false)` and `grid("on")` / `grid("off")` set the grid;
+`grid()` toggles it. `axis([xmin,xmax,ymin,ymax])` sets finite increasing bounds,
+and `axis("auto")` restores automatic bounds, including after interactive zoom.
+Use parenthesized calls, not command syntax such as `grid on`.
+
+Console commands and editor scripts share the same figure. A new `plot` replaces
+it and resets labels/settings; later metadata commands update it without
+retransmitting points. Changes to labels/theme preserve interactive zoom, while
+explicit axis commands reset the relevant view. Plotly provides zoom, pan,
+legend interaction, axis reset and PNG export. Large legends scroll, and long
+display labels may be abbreviated; the original text is available in the
+figure tooltip. `clf()` clears the figure. Session reset, engine replacement,
+renderer loss and application shutdown discard it; cooperative cancellation or
+a later runtime error preserves completed figure effects.
+
+Plotting commands return no value and are forbidden inside `parfor`. `check`
+does not create or modify figures. A plain terminal host reports an explicit
+error directing users to Sun Studio rather than silently discarding graphics.
+The native backend also rejects these commands. Multiple simultaneous figures,
+`hold`, subplots, style strings, logarithmic axes, 3D graphics and animations
+are not implemented in this initial version.
+
+Open and execute `examples/graficos.sun` in Studio. Syntax can also be checked:
+
+```sh
+cargo run -p sun -- check examples/graficos.sun
+```
+
+### Numeric CSV import and export
+
+The interpreter uses the Rust `csv` crate for numeric matrix files:
+
+```matlab
+A = readmatrix("dados.csv");
+writematrix(A * 2, "resultado.csv");
+```
+
+`readmatrix(filename)` returns a numeric matrix, including `1x1` for a single
+field. `writematrix(matrix, filename)` accepts a numeric matrix or scalar and
+returns no value; use it as a statement. Both require explicit filenames.
+Files use UTF-8, comma separators, decimal points and no headers. LF/CRLF,
+an optional UTF-8 BOM and quoted numeric fields are accepted; surrounding
+field whitespace is trimmed. Rows must have the same number of fields, and
+every field must parse as `f64`. Headers, text, empty/missing fields, malformed
+quotes and invalid UTF-8 raise `Sun:InvalidCSV`, not inferred or padded data.
+Blank lines are ignored. Scientific notation and explicit NaN/Inf values are
+supported. Export uses LF, preserves finite `f64` round-trip precision and
+writes nonfinite values as `NaN`, `Inf` and `-Inf`.
+
+An empty file imports as `0x0`; writing `[]` creates an empty file. Other empty
+shapes such as `0x3` or `3x0` cannot be preserved by plain numeric CSV and are
+rejected before writing. The initial implementation limits files to 64 MiB,
+records to 1 MiB, columns to 65,536 and matrices to the existing 16,777,216
+element/dimension limit. Reading validates record limits before parser buffer
+growth and accumulates numbers in one fallible row-major buffer.
+
+Paths are relative to the process working directory. `sun run` and `sun repl`
+use the terminal's directory; Studio uses the opened script's directory, then
+the selected project folder, then the engine checkout. Absolute paths also work.
+Missing files, inaccessible paths and filesystem failures raise `Sun:IOError`.
+Errors are catchable and a failed import does not replace the destination
+variable. `check` does not open or modify CSV files.
+
+Export replaces an existing regular file atomically using a temporary file in
+the same directory; invalid data, serialization failure or cancellation before
+commit does not replace it with partial content. Existing permissions are
+preserved; new files use the temporary-file library's private default.
+Symbolic-link destinations, directories and special files are rejected rather
+than replaced. Input must resolve to a regular file; reading a symlink to a
+regular file is permitted. Cancellation is checked between reads, fields and
+records and before committing output. An OS filesystem operation already
+blocked inside a host call is not guaranteed to stop immediately; Studio's
+existing forced-stop fallback still applies. Completed exports are not rolled
+back by a later script error.
+
+These functions perform filesystem effects through overridable `RuntimeHost`
+methods. Sun scripts are trusted code and may access paths outside Studio's
+file explorer; renderer IPC file authorization is not an interpreter sandbox.
+Embedded hosts can deny or redirect file access. CSV effects are rejected in
+`parfor`, and the native backend reports interpreter guidance. Delimiter/locale
+options, append mode, tables with headers and mixed-type data remain future work.
+
+The example below creates or replaces `matriz_exportada.csv` and
+`matriz_dobrada.csv` in the current directory:
+
+```sh
+cargo run -p sun -- check examples/csv.sun
+cargo run -p sun -- run examples/csv.sun
+```
+
+### Numeric base
+
+`true` and `false` are reserved boolean literals, distinct from numeric values.
+Comparisons, `!`, `&&`, `||` and `isempty` return booleans. Conditions accept
+booleans and finite scalar numbers. In arithmetic, reductions, elementary
+functions and numeric matrix literals/assignments, booleans convert to `0/1`.
+Matrices still store `f64`: `[true, false]` is the numeric matrix `[1, 0]`, not a
+logical array. Boolean masks, logical matrices and elementwise matrix
+comparisons are not implemented. `switch` matches booleans by the same-type
+rule rather than coercing them to numbers.
+
+`start:stop` and `start:step:stop` produce row vectors in expressions, including
+function arguments and matrix concatenation such as `[1:3, 7]`. Step defaults
+to one; descending ranges need a negative step. Bounds and step must be finite
+numeric scalars, and step cannot be zero. Empty ranges have shape `1x0`.
+Arithmetic binds more tightly than colon, which binds more tightly than
+comparisons. Loop-header ranges remain lazy; ordinary expressions materialize
+their values. Numeric vectors can index matrices, and index expressions are
+evaluated once. Direct range selectors require integer components and bare
+`:` is valid only for indexing; logical masking is not supported.
+
+`zeros`, `ones` and `eye` accept no arguments (a `1x1` matrix), one scalar size
+(a square matrix), two dimensions, or a two-element size vector. For example:
+
+```matlab
+Z = zeros(2, 3);
+U = ones(size(Z));
+I = eye(2, 3);
+samples = 0:0.5:2;
+roots = sqrt([1, 4; 9, 16]);
+average = mean(samples);
+clipped = max(roots, 2);
+```
+
+Dimensions must be nonnegative finite integers; zero dimensions retain their
+shape. Constructors, materialized ranges and checked expanding operations
+limit dimensions and element counts to 16,777,216, reporting an error before
+oversized allocations. This is not a total session-memory quota.
+
+`sum`, `mean`, `min` and `max` reduce **all elements**, preserving Sun's existing
+`sum` convention rather than MATLAB's default per-column reduction. Scalars
+are unchanged. `sum([])` is `0`, `mean([])` is `NaN`, and `min([])` / `max([])`
+are `0x0` matrices. NaNs propagate. The two-argument forms `min(A,B)` and
+`max(A,B)` compare elementwise, supporting scalar expansion and compatible 2D
+singleton broadcasting. Axis/dimension arguments and missing-value policies
+are not implemented.
+
+`sqrt`, `sin`, `cos`, `tan`, `abs`, `exp` and `log` operate on scalars or map
+each matrix element, preserving shape, including `0xN`/`Nx0` matrices. They use
+real `f64` behavior: invalid real domains produce `NaN`, and infinities are
+retained; complex arithmetic is not implemented. These additions are available
+in the interpreter and Studio; native boolean/range/construction/reduction and
+matrix elementary-function support remains limited and unsupported constructs
+are rejected rather than approximated.
+
+```sh
+cargo run -p sun -- check examples/base_numerica.sun
+cargo run -p sun -- run examples/base_numerica.sun
+```
+
+### User-defined functions
+
+Functions accept positional arguments and declare zero or one named output:
+
+```matlab
+answer = square(5);
+notify("done");
+
+function result = square(value)
+	result = value * value;
+end
+
+function notify(text)
+	disp(text);
+end
+```
+
+Declarations must be at module level, with parentheses and a closing `end`.
+They are registered before the script runs, so calls may precede declarations
+and functions can call one another. Each call gets local variables containing
+only its parameters; it cannot read or modify the caller's variables. Arguments,
+including matrices, are passed by value. Built-ins remain available, and a user
+function can shadow a built-in. A same-named matrix variable takes precedence
+as indexing; other same-named variables are not callable.
+
+The named output must be assigned before normal completion or `return`;
+otherwise the call raises `Sun:UnassignedOutput`. A function without an output
+can be called as a statement but not used as a value (`Sun:NoOutput`). Argument
+counts must match exactly. Recursion and mutual recursion are supported up to
+32 simultaneous calls; exceeding this raises catchable `Sun:RecursionLimit`.
+Errors propagate to the caller's `try/catch`; cancellation bypasses handlers.
+Output, pause state and cancellation use the current session host.
+
+REPL and Studio definitions persist across commands. A later command may
+replace a definition, while duplicate names within one module are rejected.
+Check validates source without registering or replacing definitions. Clearing
+the session removes functions as well as variables. Studio lists function
+signatures in the Workspace, separately from local variables.
+
+Nested functions, closures, anonymous functions, multiple outputs, optional
+arguments and automatic lookup of function files are not implemented. Load
+definitions by executing their source in the session. User-function calls
+inside `parfor` are rejected until their effects can be analyzed; a function
+may itself contain a supported `parfor`. Native compilation of functions is
+not supported yet and reports interpreter guidance.
+
+```sh
+cargo run -p sun -- check examples/functions.sun
+cargo run -p sun -- run examples/functions.sun
+```
+
+### Persistent sessions
+
+`sun repl` retains variables and pause settings between commands without
+re-executing earlier source. Enter multiline blocks through their closing `end`.
+`:clear` clears variables/functions and resets pause settings, `:cancel` discards an
+unfinished block, and `:quit` exits. Runtime errors preserve earlier successful
+assignments; syntax errors do not execute the command.
+
+Sun Studio shares one in-memory session between console commands and editor
+scripts. Clear Session resets variables and functions, while Clear Console only removes the
+transcript. Cooperative Stop preserves completed assignments and bypasses
+`catch`; a numerical operation that cannot stop promptly may require killing
+the engine, which explicitly clears the Workspace. Sessions are not saved to
+disk or reconstructed by replay after shutdown or engine replacement.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design notes.

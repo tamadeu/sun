@@ -1,0 +1,9 @@
+x = 0:0.1:6;
+curvas = [transpose(sin(x)), transpose(cos(x))];
+plot(x, curvas);
+title("Seno e cosseno");
+xlabel("Tempo (s)");
+ylabel("Amplitude");
+legend("Seno", "Cosseno");
+grid(true);
+axis([0, 6, -1.2, 1.2]);

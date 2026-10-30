@@ -12,7 +12,11 @@ path = "src/main.rs"
 clap.workspace = true
 crossterm = "0.29"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 sun-lexer = { path = "../sun-lexer" }
 sun-parser = { path = "../sun-parser" }
 sun-runtime = { path = "../sun-runtime" }
 sun-codegen-llvm = { path = "../sun-codegen-llvm" }
+
+[dev-dependencies]
+tempfile = "3"

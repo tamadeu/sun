@@ -16,17 +16,33 @@ pub enum ParseError {
 }
 
 pub fn parse(source: &str) -> Result<Module, ParseError> {
-    Parser { tokens: lex(source)?, current: 0, loop_depth: 0, argument_depth: 0 }.module()
+    Parser { tokens: lex(source)?, current: 0, loop_depth: 0, argument_depth: 0, block_depth: 0 }.module()
 }
 
-struct Parser { tokens: Vec<Token>, current: usize, loop_depth: usize, argument_depth: usize }
+struct Parser { tokens: Vec<Token>, current: usize, loop_depth: usize, argument_depth: usize, block_depth: usize }
 
 impl Parser {
     fn module(mut self) -> Result<Module, ParseError> {
-        Ok(Module { statements: self.block(&[])? })
+        let statements = self.block(&[])?;
+        let mut names = std::collections::HashSet::new();
+        for statement in &statements {
+            if let StmtKind::Function(function) = &statement.kind {
+                if !names.insert(&function.name) {
+                    return Err(ParseError::UnexpectedToken { offset: statement.span.start, expected: "unique function name within module" });
+                }
+            }
+        }
+        Ok(Module { statements })
     }
 
     fn block(&mut self, terminators: &[TokenKind]) -> Result<Vec<Stmt>, ParseError> {
+        self.block_depth += 1;
+        let result = self.block_contents(terminators);
+        self.block_depth -= 1;
+        result
+    }
+
+    fn block_contents(&mut self, terminators: &[TokenKind]) -> Result<Vec<Stmt>, ParseError> {
         let mut statements = Vec::new();
         self.skip_separators();
         while !self.is_at_end() && !terminators.contains(&self.peek().kind) {
@@ -34,6 +50,12 @@ impl Parser {
             self.skip_separators();
         }
         Ok(statements)
+    }
+
+    fn identifier(&mut self, expected: &'static str) -> Result<String, ParseError> {
+        let token = self.expect(|kind| matches!(kind, TokenKind::Ident(_)), expected)?;
+        let TokenKind::Ident(name) = token.kind else { unreachable!() };
+        Ok(name)
     }
 
     fn condition_header(&mut self, expected: &'static str) -> Result<Expr, ParseError> {
@@ -51,6 +73,35 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek().span.start;
+        if matches!(self.peek().kind, TokenKind::Function) {
+            if self.block_depth != 1 {
+                return Err(ParseError::UnexpectedToken { offset: start, expected: "function declaration at module level" });
+            }
+            self.advance();
+            let first = self.identifier("function name or output variable")?;
+            let (name, output) = if matches!(self.peek().kind, TokenKind::Equal) {
+                self.advance();
+                (self.identifier("function name after =")?, Some(first))
+            } else { (first, None) };
+            self.expect(|kind| matches!(kind, TokenKind::LeftParen), "( after function name")?;
+            let mut parameters = Vec::new();
+            if !matches!(self.peek().kind, TokenKind::RightParen) {
+                loop {
+                    let offset = self.peek().span.start;
+                    let parameter = self.identifier("function parameter")?;
+                    if parameters.contains(&parameter) {
+                        return Err(ParseError::UnexpectedToken { offset, expected: "unique function parameter" });
+                    }
+                    parameters.push(parameter);
+                    if !matches!(self.peek().kind, TokenKind::Comma) { break; }
+                    self.advance();
+                }
+            }
+            self.expect(|kind| matches!(kind, TokenKind::RightParen), ") after function parameters")?;
+            self.expect(|kind| matches!(kind, TokenKind::Newline | TokenKind::Semicolon), "newline or semicolon after function header")?;
+            let body = self.block(&[TokenKind::End])?;
+            return self.close_block(start, StmtKind::Function(FunctionDefinition { name, parameters, output, body }), "end to close function");
+        }
         if matches!(self.peek().kind, TokenKind::For | TokenKind::ParFor) {
             let parallel = matches!(self.peek().kind, TokenKind::ParFor);
             self.advance();
@@ -58,15 +109,10 @@ impl Parser {
             let TokenKind::Ident(name) = token.kind else { unreachable!() };
             self.expect(|kind| matches!(kind, TokenKind::Equal), "= after for variable")?;
             let source = self.expression(0)?;
-            let range = if matches!(self.peek().kind, TokenKind::Colon) {
-                self.advance();
-                let next = self.expression(0)?;
-                let (step, stop) = if matches!(self.peek().kind, TokenKind::Colon) {
-                    self.advance();
-                    (Some(next), self.expression(0)?)
-                } else { (None, next) };
-                Some((step, stop))
-            } else { None };
+            let range = match &source.kind {
+                ExprKind::IndexRange { start, step, stop } => Some((*start.clone(), step.as_deref().cloned(), *stop.clone())),
+                _ => None,
+            };
             if parallel && range.is_none() {
                 return Err(ParseError::UnexpectedToken { offset: self.peek().span.start, expected: "start:stop or start:step:stop range in parfor" });
             }
@@ -76,8 +122,8 @@ impl Parser {
             self.loop_depth -= 1;
             let body = body?;
             let kind = match range {
-                Some((step, stop)) if parallel => StmtKind::ParFor { name, start: source, step, stop, body },
-                Some((step, stop)) => StmtKind::For { name, start: source, step, stop, body },
+                Some((start, step, stop)) if parallel => StmtKind::ParFor { name, start, step, stop, body },
+                Some((start, step, stop)) => StmtKind::For { name, start, step, stop, body },
                 None => StmtKind::ForEach { name, source, body },
             };
             return self.close_block(start, kind, if parallel { "end to close parfor block" } else { "end to close for block" });
@@ -210,16 +256,7 @@ impl Parser {
                 let token = self.advance().clone();
                 return Ok(Expr { kind: ExprKind::IndexAll, span: token.span });
             }
-            let start = self.expression(0)?;
-            if !matches!(self.peek().kind, TokenKind::Colon) { return Ok(start); }
-            self.advance();
-            let next = self.expression(0)?;
-            let (step, stop) = if matches!(self.peek().kind, TokenKind::Colon) {
-                self.advance();
-                (Some(Box::new(next)), self.expression(0)?)
-            } else { (None, next) };
-            Ok(Expr { span: Span::new(start.span.start, stop.span.end),
-                kind: ExprKind::IndexRange { start: Box::new(start), step, stop: Box::new(stop) } })
+            self.expression(0)
         })();
         self.argument_depth -= 1;
         result
@@ -229,6 +266,7 @@ impl Parser {
         let token = self.advance().clone();
         let mut lhs = match token.kind {
             TokenKind::Number(value) => Expr { kind: ExprKind::Number(value), span: token.span },
+            TokenKind::Bool(value) => Expr { kind: ExprKind::Bool(value), span: token.span },
             TokenKind::String(value) => Expr { kind: ExprKind::String(value), span: token.span },
             TokenKind::Ident(name) => Expr { kind: ExprKind::Identifier(name), span: token.span },
             TokenKind::End if self.argument_depth > 0 => Expr { kind: ExprKind::IndexEnd, span: token.span },
@@ -272,6 +310,21 @@ impl Parser {
                 }
                 let close = self.expect(|kind| matches!(kind, TokenKind::RightParen), ")")?;
                 lhs = Expr { span: Span::new(lhs.span.start, close.span.end), kind: ExprKind::Call { callee: Box::new(lhs), arguments } };
+                continue;
+            }
+            if matches!(self.peek().kind, TokenKind::Colon) {
+                if 6 < min_bp { break; }
+                if matches!(lhs.kind, ExprKind::IndexRange { .. }) {
+                    return Err(ParseError::UnexpectedToken { offset: self.peek().span.start, expected: "at most two colons in a range" });
+                }
+                self.advance();
+                let next = self.expression(7)?;
+                let (step, stop) = if matches!(self.peek().kind, TokenKind::Colon) {
+                    self.advance();
+                    (Some(Box::new(next)), self.expression(7)?)
+                } else { (None, next) };
+                lhs = Expr { span: Span::new(lhs.span.start, stop.span.end),
+                    kind: ExprKind::IndexRange { start: Box::new(lhs), step, stop: Box::new(stop) } };
                 continue;
             }
             let Some((left_bp, right_bp, op)) = infix_binding_power(&self.peek().kind) else { break; };
@@ -401,7 +454,7 @@ mod tests {
     #[test]
     fn rejects_malformed_and_standalone_slice_syntax() {
         for source in ["A(1::end, :);", "A(1:2:, :);", "A(1:2:3:4, :);", "A(:end, 1);", "A(1:, :);",
-            "value = :;", "value = 1:3;", "A(1:2, :); value = end;"] {
+            "value = :;", "A(1:2, :); value = end;"] {
             assert!(parse(source).is_err(), "unexpectedly accepted {source:?}");
         }
     }

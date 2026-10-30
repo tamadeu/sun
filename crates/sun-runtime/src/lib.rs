@@ -1,15 +1,23 @@
 //! Initial interpreter/runtime for Sun 0.1.
 
 mod parallel;
+mod numeric;
+mod matrix_csv;
+mod graphics;
 
-use std::{collections::HashMap, io, time::Duration};
-use sun_ast::{BinaryOp, Expr, ExprKind, Module, Stmt, StmtKind, UnaryOp};
+pub use graphics::{Figure, FigureEvent, FigureLayout, FigureTrace};
+
+use std::{collections::HashMap, io, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+use sun_ast::{BinaryOp, Expr, ExprKind, FunctionDefinition, Module, Stmt, StmtKind, UnaryOp};
 use sun_numeric::{MatrixError, SunMatrix};
 use thiserror::Error;
+
+const MAX_MATRIX_ELEMENTS: u64 = 16_777_216;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
+    Bool(bool),
     String(String),
     Matrix(SunMatrix),
     Exception(SunException),
@@ -26,6 +34,7 @@ pub struct SunException {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Bool(value) => write!(f, "{value}"),
             Self::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => write!(f, "{n:.0}"),
             Self::Number(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "{s}"),
@@ -62,10 +71,20 @@ pub enum RuntimeError {
     InvalidArgument(String),
     #[error("invalid parfor: {0}")]
     InvalidParFor(String),
+    #[error("execution cancelled")]
+    Cancelled,
+    #[error("function '{0}' did not assign output '{1}'")]
+    UnassignedOutput(String, String),
+    #[error("function '{0}' does not return a value")]
+    NoOutput(String),
+    #[error("maximum function call depth of 32 exceeded")]
+    RecursionLimit,
     #[error(transparent)]
     Exception(#[from] SunException),
     #[error("runtime I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("invalid numeric CSV: {0}")]
+    Csv(String),
     #[error(transparent)]
     Matrix(#[from] MatrixError),
 }
@@ -79,9 +98,15 @@ impl RuntimeError {
             Self::InvalidForRange(_) => "Sun:InvalidForRange",
             Self::InvalidArgument(_) => "Sun:InvalidArgument",
             Self::InvalidParFor(_) => "Sun:InvalidParFor",
+            Self::Cancelled => "Sun:Cancelled",
+            Self::UnassignedOutput(_, _) => "Sun:UnassignedOutput",
+            Self::NoOutput(_) => "Sun:NoOutput",
+            Self::RecursionLimit => "Sun:RecursionLimit",
             Self::Io(_) => "Sun:IOError",
+            Self::Csv(_) => "Sun:InvalidCSV",
             Self::Exception(exception) => &exception.identifier,
             Self::Matrix(error) => match error {
+                MatrixError::SizeLimit => "Sun:MatrixSizeLimit",
                 MatrixError::Empty => "Sun:EmptyMatrix",
                 MatrixError::RaggedRows => "Sun:RaggedMatrixRows",
                 MatrixError::IndexOutOfBounds { .. } | MatrixError::LinearIndexOutOfBounds { .. } => "Sun:IndexOutOfBounds",
@@ -99,8 +124,49 @@ impl RuntimeError {
     }
 }
 
+pub type CancellationFlag = Arc<AtomicBool>;
+
 pub trait RuntimeHost {
     fn write_line(&mut self, line: &str) -> io::Result<()>;
+
+    fn figure_event(&mut self, _event: &FigureEvent) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "figure output requires a graphical host; use Sun Studio"))
+    }
+
+    fn read_file(&mut self, path: &std::path::Path) -> io::Result<Box<dyn io::Read>> {
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "CSV input must be a regular file"));
+        }
+        Ok(Box::new(std::fs::File::open(path)?))
+    }
+
+    fn write_file_atomic(&mut self, path: &std::path::Path, contents: &[u8]) -> io::Result<()> {
+        use io::Write;
+        let cancelled = self.cancellation_flag();
+        if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "execution cancelled"));
+        }
+        let permissions = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "CSV output must not be a directory, special file or symbolic link"));
+            }
+            Ok(metadata) => Some(metadata.permissions()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(contents)?;
+        if let Some(permissions) = permissions { temporary.as_file().set_permissions(permissions)?; }
+        temporary.as_file().sync_all()?;
+        if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "execution cancelled"));
+        }
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    fn cancellation_flag(&self) -> Option<CancellationFlag> { None }
 
     fn pause(&mut self, duration: Duration) -> io::Result<()> {
         if !duration.is_zero() { std::thread::sleep(duration); }
@@ -116,9 +182,18 @@ struct ExecutionContext<'a> {
     host: &'a mut dyn RuntimeHost,
     pause_enabled: bool,
     index_end: Option<usize>,
+    cancelled: Option<CancellationFlag>,
+    functions: &'a HashMap<String, Arc<FunctionDefinition>>,
+    call_depth: usize,
+    graphics: &'a mut graphics::GraphicsState,
 }
 
 impl ExecutionContext<'_> {
+    fn check_cancelled(&self) -> Result<(), RuntimeError> {
+        if self.cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) { Err(RuntimeError::Cancelled) }
+        else { Ok(()) }
+    }
+
     fn write_line(&mut self, line: &str) -> io::Result<()> { self.host.write_line(line) }
 
     fn pause(&mut self, duration: Duration) -> io::Result<()> {
@@ -154,22 +229,62 @@ pub struct ExecutionReport {
     pub result: Result<(), RuntimeError>,
 }
 
+pub struct Session {
+    variables: HashMap<String, Value>,
+    pause_enabled: bool,
+    functions: HashMap<String, Arc<FunctionDefinition>>,
+    graphics: graphics::GraphicsState,
+}
+
+impl Default for Session {
+    fn default() -> Self { Self::new() }
+}
+
+impl Session {
+    pub fn new() -> Self { Self { variables: HashMap::new(), pause_enabled: true, functions: HashMap::new(), graphics: graphics::GraphicsState::default() } }
+
+    pub fn variables(&self) -> &HashMap<String, Value> { &self.variables }
+
+    pub fn functions(&self) -> impl Iterator<Item = &FunctionDefinition> { self.functions.values().map(Arc::as_ref) }
+
+    pub fn figure(&self) -> Option<&Figure> { self.graphics.current.as_ref() }
+
+    pub fn clear(&mut self) {
+        self.variables.clear();
+        self.pause_enabled = true;
+        self.functions.clear();
+        self.graphics = graphics::GraphicsState::default();
+    }
+
+    pub fn execute(&mut self, module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
+        validate_parallel_blocks(module)?;
+        let cancelled = host.cancellation_flag();
+        if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) { return Err(RuntimeError::Cancelled); }
+        for statement in &module.statements {
+            if let StmtKind::Function(function) = &statement.kind {
+                self.functions.insert(function.name.clone(), Arc::new(function.clone()));
+            }
+        }
+        let mut context = ExecutionContext { host, pause_enabled: self.pause_enabled, index_end: None, cancelled,
+            functions: &self.functions, call_depth: 0, graphics: &mut self.graphics };
+        let result = execute_statements(&module.statements, &mut self.variables, &mut context).and_then(|flow| match flow {
+            ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
+            ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
+            ExecutionFlow::Continue => Err(RuntimeError::Unsupported("continue is only valid inside a loop".into())),
+        });
+        self.pause_enabled = context.pause_enabled;
+        if context.check_cancelled().is_err() { Err(RuntimeError::Cancelled) } else { result }
+    }
+}
+
 pub fn execute_with_host(module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
     execute_with_report(module, host).result
 }
 
 pub fn execute_with_report(module: &Module, host: &mut dyn RuntimeHost) -> ExecutionReport {
-    let mut env = HashMap::<String, Value>::new();
-    let result = (|| {
-        validate_parallel_blocks(module)?;
-        let mut context = ExecutionContext { host, pause_enabled: true, index_end: None };
-        match execute_statements(&module.statements, &mut env, &mut context)? {
-            ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
-            ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
-            ExecutionFlow::Continue => Err(RuntimeError::Unsupported("continue is only valid inside a loop".into())),
-        }
-    })();
-    ExecutionReport { variables: env, result }
+    let mut session = Session::new();
+    let result = session.execute(module, host);
+    ExecutionReport { variables: session.variables, result }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +339,7 @@ fn for_scalar(value: Value) -> Result<f64, RuntimeError> {
 
 fn scalar_condition(value: Value, context: &str) -> Result<bool, RuntimeError> {
     match value {
+        Value::Bool(value) => Ok(value),
         Value::Number(number) if number.is_finite() => Ok(number != 0.0),
         other => Err(RuntimeError::Unsupported(format!("{context} condition must be a finite scalar number, got {other}"))),
     }
@@ -231,31 +347,35 @@ fn scalar_condition(value: Value, context: &str) -> Result<bool, RuntimeError> {
 
 fn switch_value(value: Value, context: &str) -> Result<Value, RuntimeError> {
     match value {
-        Value::Number(_) | Value::String(_) => Ok(value),
+        Value::Number(_) | Value::String(_) | Value::Bool(_) => Ok(value),
         other => Err(RuntimeError::Unsupported(format!("switch {context} must be a number or string, got {other}"))),
     }
 }
 
 fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<ExecutionFlow, RuntimeError> {
+    output.check_cancelled()?;
     for statement in statements {
+        output.check_cancelled()?;
         match &statement.kind {
+            StmtKind::Function(_) => {}
             StmtKind::Assign { name, value } => {
                 let result = eval(value, env, output)?;
                 env.insert(name.clone(), result.clone());
                 if !statement.suppress_output { output.write_line(&format!("{name} = {result}"))?; }
             }
             StmtKind::LinearIndexAssign { name, index, value } => {
-                let (shape, elements) = match env.get(name) {
-                    Some(Value::Matrix(matrix)) => (matrix.shape(), matrix.element_count()),
+                let shape = match env.get(name) {
+                    Some(Value::Matrix(matrix)) => matrix.shape(),
                     Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 };
-                if is_slice_index(index) {
-                    let indices = eval_selection(index, env, output, IndexAxis::Linear, shape)?;
+                let index = evaluate_index(index, env, output, IndexAxis::Linear, shape)?;
+                if let MatrixIndex::Selection(indices) = index {
                     let value = eval(value, env, output)?;
                     match env.get_mut(name) {
                         Some(Value::Matrix(matrix)) => match value {
                             Value::Number(number) => matrix.fill_linear_selection(&indices, number)?,
+                            Value::Bool(value) => matrix.fill_linear_selection(&indices, u8::from(value) as f64)?,
                             Value::Matrix(values) => matrix.assign_linear_selection(&indices, &values)?,
                             other => return Err(RuntimeError::Unsupported(format!("linear slice assignment value must be a number or matrix, got {other}"))),
                         },
@@ -264,9 +384,10 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                     }
                     continue;
                 }
-                let index = eval_index(index, env, output, "linear", elements)?;
+                let MatrixIndex::Scalar(index) = index else { unreachable!() };
                 let value = match eval(value, env, output)? {
                     Value::Number(number) => number,
+                    Value::Bool(value) => u8::from(value) as f64,
                     other => return Err(RuntimeError::Unsupported(format!("matrix assignment value must be a number, got {other}"))),
                 };
                 match env.get_mut(name) {
@@ -281,13 +402,16 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                     Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 };
-                if is_slice_index(row) || is_slice_index(col) {
-                    let row_indices = eval_selection(row, env, output, IndexAxis::Row, (rows, cols))?;
-                    let column_indices = eval_selection(col, env, output, IndexAxis::Column, (rows, cols))?;
+                let row = evaluate_index(row, env, output, IndexAxis::Row, (rows, cols))?;
+                let col = evaluate_index(col, env, output, IndexAxis::Column, (rows, cols))?;
+                if !matches!(row, MatrixIndex::Scalar(_)) || !matches!(col, MatrixIndex::Scalar(_)) {
+                    let row_indices = row.into_indices();
+                    let column_indices = col.into_indices();
                     let value = eval(value, env, output)?;
                     match env.get_mut(name) {
                         Some(Value::Matrix(matrix)) => match value {
                             Value::Number(number) => matrix.fill_selection(&row_indices, &column_indices, number)?,
+                            Value::Bool(value) => matrix.fill_selection(&row_indices, &column_indices, u8::from(value) as f64)?,
                             Value::Matrix(values) => matrix.assign_selection(&row_indices, &column_indices, &values)?,
                             other => return Err(RuntimeError::Unsupported(format!("slice assignment value must be a number or matrix, got {other}"))),
                         },
@@ -296,10 +420,11 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                     }
                     continue;
                 }
-                let row = eval_index(row, env, output, "row", rows)?;
-                let col = eval_index(col, env, output, "column", cols)?;
+                let MatrixIndex::Scalar(row) = row else { unreachable!() };
+                let MatrixIndex::Scalar(col) = col else { unreachable!() };
                 let value = match eval(value, env, output)? {
                     Value::Number(number) => number,
+                    Value::Bool(value) => u8::from(value) as f64,
                     other => return Err(RuntimeError::Unsupported(format!("matrix assignment value must be a number, got {other}"))),
                 };
                 match env.get_mut(name) {
@@ -336,7 +461,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
             }
             StmtKind::ForEach { name, source, body } => {
                 match eval(source, env, output)? {
-                    value @ Value::Number(_) => {
+                    value @ (Value::Number(_) | Value::Bool(_)) => {
                         env.insert(name.clone(), value);
                         match execute_statements(body, env, output)? {
                             ExecutionFlow::Return => return Ok(ExecutionFlow::Return),
@@ -400,6 +525,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                 let flow = match execute_statements(body, env, output) {
                     Ok(flow) => flow,
                     Err(error) => {
+                        output.check_cancelled()?;
                         if let Some(name) = catch_name {
                             env.insert(name.clone(), Value::Exception(error.to_exception()));
                         }
@@ -412,19 +538,12 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
             StmtKind::Continue => return Ok(ExecutionFlow::Continue),
             StmtKind::Return => return Ok(ExecutionFlow::Return),
             StmtKind::Expr(expr) => {
-                let result = eval(expr, env, output)?;
+                let result = eval_expression(expr, env, output, true)?;
                 if !statement.suppress_output && result != Value::Void { output.write_line(&result.to_string())?; }
             }
         }
     }
     Ok(ExecutionFlow::Normal)
-}
-
-fn eval_index(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: &str, dimension: usize) -> Result<usize, RuntimeError> {
-    let previous = output.index_end.replace(dimension);
-    let result = eval(expr, env, output);
-    output.index_end = previous;
-    index_number(result?, axis)
 }
 
 fn index_number(value: Value, axis: &str) -> Result<usize, RuntimeError> {
@@ -434,12 +553,49 @@ fn index_number(value: Value, axis: &str) -> Result<usize, RuntimeError> {
     }
 }
 
-fn is_slice_index(expr: &Expr) -> bool {
-    matches!(expr.kind, ExprKind::IndexAll | ExprKind::IndexRange { .. })
-}
-
 #[derive(Clone, Copy)]
 enum IndexAxis { Row, Column, Linear }
+
+enum MatrixIndex { Scalar(usize), Selection(Vec<usize>) }
+
+impl MatrixIndex {
+    fn into_indices(self) -> Vec<usize> {
+        match self { Self::Scalar(index) => vec![index], Self::Selection(indices) => indices }
+    }
+}
+
+fn evaluate_index(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: IndexAxis, shape: (usize, usize)) -> Result<MatrixIndex, RuntimeError> {
+    if matches!(expr.kind, ExprKind::IndexAll | ExprKind::IndexRange { .. }) {
+        return Ok(MatrixIndex::Selection(eval_selection(expr, env, output, axis, shape)?));
+    }
+    let (label, dimension) = match axis {
+        IndexAxis::Row => ("row", shape.0), IndexAxis::Column => ("column", shape.1), IndexAxis::Linear => ("linear", shape.0 * shape.1),
+    };
+    let previous = output.index_end.replace(dimension);
+    let result = eval(expr, env, output);
+    output.index_end = previous;
+    match result? {
+        Value::Matrix(matrix) => {
+            if !matrix.is_empty() && matrix.shape().0 != 1 && matrix.shape().1 != 1 {
+                return Err(RuntimeError::InvalidArgument("matrix indices must be numeric vectors".into()));
+            }
+            let mut indices = Vec::with_capacity(matrix.element_count());
+            for offset in 1..=matrix.element_count() {
+                let index = index_number(Value::Number(matrix.get_linear(offset)?), label)?;
+                if index > dimension {
+                    return Err(match axis {
+                        IndexAxis::Row => MatrixError::IndexOutOfBounds { row: index, col: 1, rows: shape.0, cols: shape.1 },
+                        IndexAxis::Column => MatrixError::IndexOutOfBounds { row: 1, col: index, rows: shape.0, cols: shape.1 },
+                        IndexAxis::Linear => MatrixError::LinearIndexOutOfBounds { index, elements: dimension },
+                    }.into());
+                }
+                indices.push(index);
+            }
+            Ok(MatrixIndex::Selection(indices))
+        }
+        value => Ok(MatrixIndex::Scalar(index_number(value, label)?)),
+    }
+}
 
 fn slice_integer(value: Value, component: &str) -> Result<f64, RuntimeError> {
     match value {
@@ -500,20 +656,44 @@ fn eval_selection(expr: &Expr, env: &HashMap<String, Value>, output: &mut Execut
             output.index_end = previous;
             result
         }
-        _ => Ok(vec![eval_index(expr, env, output, label, dimension)?]),
+        _ => Err(RuntimeError::InvalidArgument("expected : or a range selector".into())),
     }
 }
 
 fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
+    eval_expression(expr, env, output, false)
+}
+
+fn eval_expression(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, allow_void: bool) -> Result<Value, RuntimeError> {
     match &expr.kind {
         ExprKind::Number(n) => Ok(Value::Number(*n)),
+        ExprKind::Bool(value) => Ok(Value::Bool(*value)),
         ExprKind::String(s) => Ok(Value::String(s.clone())),
         ExprKind::IndexEnd => output.index_end.map(|dimension| Value::Number(dimension as f64))
             .ok_or_else(|| RuntimeError::InvalidArgument("end is only valid inside a matrix index".into())),
-        ExprKind::IndexAll | ExprKind::IndexRange { .. } => Err(RuntimeError::InvalidArgument("slice expressions require a direct matrix index".into())),
+        ExprKind::IndexAll => Err(RuntimeError::InvalidArgument("bare : requires a direct matrix index".into())),
+        ExprKind::IndexRange { start, step, stop } => {
+            let start = for_scalar(eval(start, env, output)?)?;
+            let step = match step { Some(step) => for_scalar(eval(step, env, output)?)?, None => 1.0 };
+            let stop = for_scalar(eval(stop, env, output)?)?;
+            let range = NumericRange::new(start, step, stop)?;
+            if range.length > MAX_MATRIX_ELEMENTS {
+                return Err(RuntimeError::InvalidArgument("range exceeds the 16777216-element matrix limit".into()));
+            }
+            let mut values = Vec::with_capacity(range.length as usize);
+            for offset in 0..range.length {
+                if offset % 4096 == 0 { output.check_cancelled()?; }
+                let value = range.value_at(offset);
+                if !value.is_finite() || values.last() == Some(&value) {
+                    return Err(RuntimeError::InvalidForRange("step cannot produce distinct finite range values".into()));
+                }
+                values.push(value);
+            }
+            Ok(Value::Matrix(SunMatrix::from_rows(vec![values])?))
+        }
         ExprKind::Identifier(name) => match env.get(name) {
             Some(value) => Ok(value.clone()),
-            None if name == "pause" => call(name, Vec::new(), output),
+            None if name == "pause" => call_function(name, Vec::new(), output, allow_void),
             None => Err(RuntimeError::UndefinedVariable(name.clone())),
         },
         ExprKind::FieldAccess { object, field } => {
@@ -527,25 +707,33 @@ fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext
             }
         }
         ExprKind::Matrix(rows) => {
-            let mut values = Vec::with_capacity(rows.len());
+            let mut row_blocks = Vec::with_capacity(rows.len());
             for row in rows {
-                let mut current = Vec::with_capacity(row.len());
+                let mut blocks = Vec::with_capacity(row.len());
                 for item in row {
                     match eval(item, env, output)? {
-                        Value::Number(n) => current.push(n),
+                        Value::Number(number) => blocks.push(SunMatrix::filled(1, 1, number)?),
+                        Value::Bool(value) => blocks.push(SunMatrix::filled(1, 1, u8::from(value) as f64)?),
+                        Value::Matrix(matrix) => blocks.push(matrix),
                         other => return Err(RuntimeError::Unsupported(format!("matrix elements must be numbers, got {other}"))),
                     }
                 }
-                values.push(current);
+                row_blocks.push(SunMatrix::concatenate(&blocks, 1)?);
             }
-            Ok(Value::Matrix(SunMatrix::from_rows(values)?))
+            let matrix = SunMatrix::concatenate(&row_blocks, 0).map_err(|error| match error {
+                MatrixError::IncompatibleDimensions => MatrixError::RaggedRows,
+                other => other,
+            })?;
+            Ok(Value::Matrix(matrix))
         }
         ExprKind::Unary { op, operand } => {
             let value = eval(operand, env, output)?;
             match (op, value) {
                 (UnaryOp::Positive, Value::Number(n)) => Ok(Value::Number(n)),
                 (UnaryOp::Negative, Value::Number(n)) => Ok(Value::Number(-n)),
-                (UnaryOp::Not, Value::Number(n)) => Ok(Value::Number((n == 0.0) as u8 as f64)),
+                (UnaryOp::Positive, Value::Bool(value)) => Ok(Value::Number(u8::from(value) as f64)),
+                (UnaryOp::Negative, Value::Bool(value)) => Ok(Value::Number(-(u8::from(value) as f64))),
+                (UnaryOp::Not, value) => Ok(Value::Bool(!scalar_condition(value, "logical negation")?)),
                 (op, value) => Err(RuntimeError::Unsupported(format!("unary {op:?} on {value}"))),
             }
         }
@@ -558,7 +746,7 @@ fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext
                     BinaryOp::Or if left => true,
                     _ => scalar_condition(eval(right, env, output)?, "logical operator")?,
                 };
-                return Ok(Value::Number(result as u8 as f64));
+                return Ok(Value::Bool(result));
             }
             let right = eval(right, env, output)?;
             binary(left, *op, right)
@@ -570,38 +758,82 @@ fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext
             // A matrix followed by parentheses is indexed with Sun's 1-based convention.
             if let Some(Value::Matrix(matrix)) = env.get(name) {
                 if arguments.len() == 1 {
-                    if is_slice_index(&arguments[0]) {
-                        let indices = eval_selection(&arguments[0], env, output, IndexAxis::Linear, matrix.shape())?;
-                        let force_column = matches!(arguments[0].kind, ExprKind::IndexAll);
-                        return Ok(Value::Matrix(matrix.select_linear(&indices, force_column)?));
+                    match evaluate_index(&arguments[0], env, output, IndexAxis::Linear, matrix.shape())? {
+                        MatrixIndex::Selection(indices) => {
+                            let force_column = matches!(arguments[0].kind, ExprKind::IndexAll);
+                            return Ok(Value::Matrix(matrix.select_linear(&indices, force_column)?));
+                        }
+                        MatrixIndex::Scalar(index) => return Ok(Value::Number(matrix.get_linear(index)?)),
                     }
-                    let index = eval_index(&arguments[0], env, output, "linear", matrix.element_count())?;
-                    return Ok(Value::Number(matrix.get_linear(index)?));
                 }
                 if arguments.len() != 2 {
                     return Err(RuntimeError::Arity(name.clone(), "one linear index A(index) or two indices A(row, column)".into()));
                 }
                 let (rows, cols) = matrix.shape();
-                if arguments.iter().any(is_slice_index) {
-                    let row_indices = eval_selection(&arguments[0], env, output, IndexAxis::Row, (rows, cols))?;
-                    let column_indices = eval_selection(&arguments[1], env, output, IndexAxis::Column, (rows, cols))?;
+                let row = evaluate_index(&arguments[0], env, output, IndexAxis::Row, (rows, cols))?;
+                let col = evaluate_index(&arguments[1], env, output, IndexAxis::Column, (rows, cols))?;
+                if !matches!(row, MatrixIndex::Scalar(_)) || !matches!(col, MatrixIndex::Scalar(_)) {
+                    let row_indices = row.into_indices();
+                    let column_indices = col.into_indices();
                     return Ok(Value::Matrix(matrix.select(&row_indices, &column_indices)?));
                 }
-                let row = eval_index(&arguments[0], env, output, "row", rows)?;
-                let col = eval_index(&arguments[1], env, output, "column", cols)?;
+                let MatrixIndex::Scalar(row) = row else { unreachable!() };
+                let MatrixIndex::Scalar(col) = col else { unreachable!() };
                 return Ok(Value::Number(matrix.get(row, col)?));
+            }
+            if output.functions.contains_key(name) && env.contains_key(name) {
+                return Err(RuntimeError::Unsupported(format!("variable '{name}' is not a callable function or matrix")));
             }
             let mut args = Vec::with_capacity(arguments.len());
             for arg in arguments { args.push(eval(arg, env, output)?); }
-            call(name, args, output)
+            call_function(name, args, output, allow_void)
         }
     }
 }
 
+fn call_function(name: &str, args: Vec<Value>, context: &mut ExecutionContext<'_>, allow_void: bool) -> Result<Value, RuntimeError> {
+    let Some(function) = context.functions.get(name).cloned() else {
+        if (name == "writematrix" || graphics::handles(name)) && !allow_void { return Err(RuntimeError::NoOutput(name.into())); }
+        return call(name, args, context);
+    };
+    context.check_cancelled()?;
+    if args.len() != function.parameters.len() {
+        return Err(RuntimeError::Arity(name.into(), format!("{} arguments", function.parameters.len())));
+    }
+    if function.output.is_none() && !allow_void { return Err(RuntimeError::NoOutput(name.into())); }
+    if context.call_depth >= 32 { return Err(RuntimeError::RecursionLimit); }
+    let mut locals: HashMap<String, Value> = function.parameters.iter().cloned().zip(args).collect();
+    let previous_end = context.index_end.take();
+    context.call_depth += 1;
+    let result = (|| {
+        match execute_statements(&function.body, &mut locals, context)? {
+            ExecutionFlow::Normal | ExecutionFlow::Return => {}
+            _ => return Err(RuntimeError::Unsupported("function loop control cannot escape a call".into())),
+        }
+        context.check_cancelled()?;
+        match &function.output {
+            Some(output) => locals.remove(output).filter(|value| *value != Value::Void)
+                .ok_or_else(|| RuntimeError::UnassignedOutput(name.into(), output.clone())),
+            None => Ok(Value::Void),
+        }
+    })();
+    context.call_depth -= 1;
+    context.index_end = previous_end;
+    result
+}
+
 fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
     use BinaryOp::*;
+    let left = match left { Value::Bool(value) => Value::Number(u8::from(value) as f64), other => other };
+    let right = match right { Value::Bool(value) => Value::Number(u8::from(value) as f64), other => other };
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => {
+            if matches!(op, Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual) {
+                return Ok(Value::Bool(match op {
+                    Equal => a == b, NotEqual => a != b, Less => a < b, LessEqual => a <= b,
+                    Greater => a > b, GreaterEqual => a >= b, _ => unreachable!(),
+                }));
+            }
             let result = match op {
                 Add => a + b, Subtract => a - b, Multiply | ElementMultiply => a * b,
                 Divide | ElementDivide => a / b, Power => a.powf(b),
@@ -639,6 +871,8 @@ fn valid_error_identifier(identifier: &str) -> bool {
 }
 
 fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
+    if graphics::handles(name) { return graphics::call(name, &args, output); }
+    if matches!(name, "readmatrix" | "writematrix") { return matrix_csv::call(name, &args, output); }
     if name == "pause" {
         return match args.as_slice() {
             [] => {
@@ -690,46 +924,90 @@ fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Resu
         output.write_line(&args[0].to_string())?;
         return Ok(Value::Void);
     }
-    if name == "solve" {
-        if args.len() != 2 { return Err(RuntimeError::Arity(name.into(), "two matrix arguments: solve(A, B)".into())); }
-        return match (&args[0], &args[1]) {
-            (Value::Matrix(a), Value::Matrix(b)) => Ok(Value::Matrix(a.solve(b)?)),
-            _ => Err(RuntimeError::Unsupported("solve expects two matrices".into())),
-        };
-    }
-    if args.len() != 1 { return Err(RuntimeError::Arity(name.into(), "one argument".into())); }
-    let arg = args.into_iter().next().unwrap();
-    match (name, arg) {
-        ("sqrt", Value::Number(n)) => Ok(Value::Number(n.sqrt())),
-        ("sin", Value::Number(n)) => Ok(Value::Number(n.sin())),
-        ("cos", Value::Number(n)) => Ok(Value::Number(n.cos())),
-        ("tan", Value::Number(n)) => Ok(Value::Number(n.tan())),
-        ("abs", Value::Number(n)) => Ok(Value::Number(n.abs())),
-        ("exp", Value::Number(n)) => Ok(Value::Number(n.exp())),
-        ("log", Value::Number(n)) => Ok(Value::Number(n.ln())),
-        ("size", Value::Matrix(matrix)) => {
-            let (rows, cols) = matrix.shape();
-            Ok(Value::Matrix(SunMatrix::from_rows(vec![vec![rows as f64, cols as f64]])?))
-        }
-        ("size", Value::Number(_)) => Ok(Value::Matrix(SunMatrix::from_rows(vec![vec![1.0, 1.0]])?)),
-        ("numel", Value::Matrix(matrix)) => Ok(Value::Number(matrix.element_count() as f64)),
-        ("numel", Value::Number(_)) => Ok(Value::Number(1.0)),
-        ("isempty", Value::Matrix(matrix)) => Ok(Value::Number(matrix.is_empty() as u8 as f64)),
-        ("isempty", Value::Number(_)) => Ok(Value::Number(0.0)),
-        ("sum", Value::Matrix(m)) => Ok(Value::Number(if m.is_empty() { 0.0 } else { m.to_rows().iter().flatten().copied().sum() })),
-        ("transpose", Value::Matrix(m)) => Ok(Value::Matrix(m.transpose()?)),
-        ("det", Value::Matrix(m)) => Ok(Value::Number(m.determinant()?)),
-        ("inv", Value::Matrix(m)) => Ok(Value::Matrix(m.inverse()?)),
-        ("sum", Value::Number(n)) => Ok(Value::Number(n)),
-        (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum" | "transpose" | "det" | "inv" | "solve" | "size" | "numel" | "isempty") =>
-            Err(RuntimeError::Unsupported(format!("unknown function '{unknown}'"))),
-        (known, value) => Err(RuntimeError::Unsupported(format!("function '{known}' does not support {value}"))),
-    }
+    numeric::call(name, &args)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_executes_only_new_code_and_retains_variables() {
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        session.execute(&sun_parser::parse("value = 1; disp(value);").unwrap(), &mut host).unwrap();
+        session.execute(&sun_parser::parse("value = value + 1; disp(value);").unwrap(), &mut host).unwrap();
+        assert_eq!(host.lines, vec!["1", "2"]);
+        assert!(matches!(session.variables().get("value"), Some(Value::Number(2.0))));
+    }
+
+    #[test]
+    fn cooperative_cancel_keeps_workspace_and_bypasses_catch() {
+        struct CancellingHost { flag: CancellationFlag, lines: Vec<String> }
+        impl RuntimeHost for CancellingHost {
+            fn cancellation_flag(&self) -> Option<CancellationFlag> { Some(self.flag.clone()) }
+            fn write_line(&mut self, line: &str) -> io::Result<()> {
+                self.lines.push(line.into());
+                self.flag.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+        let mut session = Session::new();
+        let mut host = CancellingHost { flag: Arc::new(AtomicBool::new(false)), lines: Vec::new() };
+        let module = sun_parser::parse("try; value = 7; disp(value); while 1; end; catch failure; handled = 1; end;").unwrap();
+        assert!(matches!(session.execute(&module, &mut host), Err(RuntimeError::Cancelled)));
+        assert_eq!(host.lines, vec!["7"]);
+        assert!(!session.variables().contains_key("handled"));
+        assert!(!session.variables().contains_key("failure"));
+        let mut next = CollectingHost { lines: Vec::new() };
+        session.execute(&sun_parser::parse("disp(value);").unwrap(), &mut next).unwrap();
+        assert_eq!(next.lines, vec!["7"]);
+    }
+
+    #[test]
+    fn session_keeps_progress_after_error_and_return_without_replaying_output() {
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        let module = sun_parser::parse("value = 7; disp(value); error(\"stop\");").unwrap();
+        assert!(session.execute(&module, &mut host).is_err());
+        session.execute(&sun_parser::parse("value = value + 1; return; value = 99;").unwrap(), &mut host).unwrap();
+        session.execute(&sun_parser::parse("disp(value);").unwrap(), &mut host).unwrap();
+        assert_eq!(host.lines, vec!["7", "8"]);
+    }
+
+    #[test]
+    fn session_preserves_matrix_updates_across_commands() {
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        session.execute(&sun_parser::parse("A = [1, 2; 3, 4];").unwrap(), &mut host).unwrap();
+        session.execute(&sun_parser::parse("A(:, end) = 9;").unwrap(), &mut host).unwrap();
+        session.execute(&sun_parser::parse("disp(A);").unwrap(), &mut host).unwrap();
+        assert_eq!(host.lines, vec!["[1, 9; 3, 9]"]);
+    }
+
+    #[test]
+    fn session_clear_resets_variables_and_pause_state() {
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        session.execute(&sun_parser::parse("value = 7; pause(\"off\");").unwrap(), &mut host).unwrap();
+        session.execute(&sun_parser::parse("pause(); disp(pause(\"query\"));").unwrap(), &mut host).unwrap();
+        assert_eq!(host.lines, vec!["off"]);
+        session.clear();
+        assert!(session.variables().is_empty());
+        assert!(session.execute(&sun_parser::parse("pause();").unwrap(), &mut host).is_err());
+        session.execute(&sun_parser::parse("disp(pause(\"query\"));").unwrap(), &mut host).unwrap();
+        assert_eq!(host.lines, vec!["off", "on"]);
+    }
+
+    #[test]
+    fn session_static_errors_leave_existing_environment_unchanged() {
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        session.execute(&sun_parser::parse("value = 1;").unwrap(), &mut host).unwrap();
+        let invalid = sun_parser::parse("value = 99; parfor index = 1:3; output(index) = output(index); end;").unwrap();
+        assert!(session.execute(&invalid, &mut host).is_err());
+        assert!(matches!(session.variables().get("value"), Some(Value::Number(1.0))));
+    }
 
     #[test]
     fn execution_report_preserves_workspace_after_runtime_failure() {
@@ -754,7 +1032,7 @@ mod tests {
     #[test]
     fn empty_literal_is_displayed_and_can_be_queried() {
         let module = sun_parser::parse("E = []; disp(E); disp(size(E)); disp(numel(E)); disp(isempty(E)); disp(size(7)); disp(numel(7)); disp(isempty(0)); if isempty(E); disp(9); end;").unwrap();
-        assert_eq!(execute(&module).unwrap(), vec!["[]", "[0, 0]", "0", "1", "[1, 1]", "1", "0", "9"]);
+        assert_eq!(execute(&module).unwrap(), vec!["[]", "[0, 0]", "0", "true", "[1, 1]", "1", "false", "9"]);
     }
 
     #[test]
@@ -1074,7 +1352,7 @@ mod tests {
 
     #[test]
     fn slice_expressions_require_a_direct_matrix_index_context() {
-        for source in ["disp(:);", "sum(1:3);"] {
+        for source in ["disp(:);"] {
             assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::InvalidArgument(_))));
         }
     }
@@ -1141,7 +1419,7 @@ mod tests {
 
     #[test]
     fn linear_indices_reject_nonpositive_fractional_and_nonfinite_values() {
-        for index in ["0", "-1", "1.5", "0 / 0", "1 / 0", "end / 4", "1e100", "[1]"] {
+        for index in ["0", "-1", "1.5", "0 / 0", "1 / 0", "end / 4", "1e100", "[0]"] {
             for operation in [format!("disp(A({index}));"), format!("A({index}) = 7;")] {
                 let source = format!("A = [1, 2, 3; 4, 5, 6]; {operation}");
                 let error = execute(&sun_parser::parse(&source).unwrap()).unwrap_err();
@@ -2048,7 +2326,7 @@ mod tests {
     #[test]
     fn short_circuits_logical_operators_and_normalizes_results() {
         let module = sun_parser::parse("disp(0 && undefined); disp(1 || undefined); disp(0 && disp(9)); disp(1 || disp(9)); disp(2 && -3); disp(0 || -3); disp(1 && 0); disp(0 || 0); disp(0 || 1 && 0); if 0 && undefined; disp(9); elseif 1 || undefined; disp(7); end; while 0 && undefined; disp(9); end").unwrap();
-        assert_eq!(execute(&module).unwrap(), vec!["0", "1", "0", "1", "1", "1", "0", "0", "0", "7"]);
+        assert_eq!(execute(&module).unwrap(), vec!["false", "true", "false", "true", "true", "true", "false", "false", "false", "7"]);
     }
 
     #[test]

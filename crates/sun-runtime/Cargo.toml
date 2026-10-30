@@ -8,6 +8,9 @@ license.workspace = true
 sun-ast = { path = "../sun-ast" }
 sun-numeric = { path = "../sun-numeric" }
 rayon = "1.11"
+csv = "1"
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]

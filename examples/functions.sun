@@ -1,0 +1,22 @@
+entrada = [1, 2; 3, 4];
+resultado = dobro(entrada);
+disp(entrada);
+disp(resultado);
+disp(fatorial(6));
+anunciar("Funcoes com escopo local");
+
+function saida = dobro(valores)
+    saida = valores * 2;
+end
+
+function saida = fatorial(numero)
+    if numero <= 1
+        saida = 1;
+        return;
+    end
+    saida = numero * fatorial(numero - 1);
+end
+
+function anunciar(texto)
+    disp(texto);
+end

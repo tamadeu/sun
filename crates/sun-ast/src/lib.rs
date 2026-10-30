@@ -14,7 +14,16 @@ pub struct Stmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FunctionDefinition {
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub output: Option<String>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
+    Function(FunctionDefinition),
     Assign { name: String, value: Expr },
     IndexAssign { name: String, row: Expr, col: Expr, value: Expr },
     LinearIndexAssign { name: String, index: Expr, value: Expr },
@@ -37,6 +46,7 @@ pub struct Expr { pub kind: ExprKind, pub span: Span }
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Number(f64),
+    Bool(bool),
     String(String),
     Identifier(String),
     IndexEnd,

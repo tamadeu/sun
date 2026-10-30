@@ -1,0 +1,9 @@
+A = [1, 2; 3, 4];
+writematrix(A, "matriz_exportada.csv");
+B = readmatrix("matriz_exportada.csv");
+disp(B);
+
+writematrix(B * 2, "matriz_dobrada.csv");
+C = readmatrix("matriz_dobrada.csv");
+disp(C);
+disp(sum(C));

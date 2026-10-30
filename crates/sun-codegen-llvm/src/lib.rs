@@ -27,8 +27,9 @@ impl Generator {
     fn expression(&mut self,expr:&Expr)->Result<NativeValue,BackendError>{
         match &expr.kind {
             ExprKind::Number(n)=>Ok(NativeValue::Scalar(format!("{:.17e}",n))),
+            ExprKind::Bool(_)=>Err(BackendError::Unsupported("booleans are only available in the interpreter; use sun run".into())),
             ExprKind::IndexEnd=>Err(BackendError::Unsupported("end in matrix indices is only available in the interpreter; use sun run".into())),
-            ExprKind::IndexAll|ExprKind::IndexRange{..}=>Err(BackendError::Unsupported("matrix slices are only available in the interpreter; use sun run".into())),
+            ExprKind::IndexAll|ExprKind::IndexRange{..}=>Err(BackendError::Unsupported("ranges and matrix slices are only available in the interpreter; use sun run".into())),
             ExprKind::Identifier(name) if name=="pause"&&!self.variables.contains_key(name)=>Err(BackendError::Unsupported("pause is only available in the interpreter; use sun run".into())),
             ExprKind::Identifier(name)=>self.variables.get(name).cloned().ok_or_else(||BackendError::UndefinedVariable(name.clone())),
             ExprKind::FieldAccess{..}=>Err(BackendError::Unsupported("exception field access is only available in the interpreter; use sun run".into())),
@@ -60,7 +61,10 @@ impl Generator {
             }
             ExprKind::Call{callee,arguments}=>{
                 let ExprKind::Identifier(name)=&callee.kind else{return Err(BackendError::Unsupported("indirect calls".into()));};
-                if matches!(name.as_str(),"error"|"rethrow"|"pause"){
+                if matches!(name.as_str(),"plot"|"title"|"xlabel"|"ylabel"|"legend"|"grid"|"axis"|"clf"){
+                    return Err(BackendError::Unsupported(format!("{name} requires a graphical interpreter host; use Sun Studio")));
+                }
+                if matches!(name.as_str(),"error"|"rethrow"|"pause"|"readmatrix"|"writematrix"){
                     return Err(BackendError::Unsupported(format!("{name} is only available in the interpreter; use sun run")));
                 }
                 if name=="disp"{
@@ -96,7 +100,7 @@ impl Generator {
                     self.emit(format!("{result} = call double @sun_matrix_get_indexed(ptr {pointer}, double {row}, double {col})"));
                     return Ok(NativeValue::Scalar(result));
                 }
-                Err(BackendError::Unsupported(format!("function '{name}' is not available in native compilation yet")))
+                Err(BackendError::Unsupported(format!("function '{name}' is not available in native compilation yet; use sun run")))
             }
             ExprKind::String(_)=>Err(BackendError::Unsupported("string literals".into())),
         }
@@ -161,6 +165,7 @@ impl Generator {
 pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
     let mut g=Generator::default();
     for stmt in &module.statements{match &stmt.kind{
+        StmtKind::Function(_)=>return Err(BackendError::Unsupported("user functions are only available in the interpreter; use sun run".into())),
         StmtKind::ParFor{..}=>return Err(BackendError::Unsupported("parfor is only available in the interpreter; use sun run".into())),
         StmtKind::For{..}|StmtKind::ForEach{..}=>return Err(BackendError::Unsupported("for loops are only available in the interpreter; use sun run".into())),
         StmtKind::While{..}=>return Err(BackendError::Unsupported("while loops are only available in the interpreter; use sun run".into())),

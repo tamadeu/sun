@@ -5,9 +5,9 @@ use sun_parser::{parse, ParseError};
 use sun_runtime::{execute_with_report, validate_parallel_blocks, RuntimeHost, Value};
 
 const PREVIEW_SIZE: usize = 10;
-const WORKSPACE_LIMIT: usize = 200;
+pub(super) const WORKSPACE_LIMIT: usize = 200;
 
-fn emit(output: &mut impl Write, event: JsonValue) -> io::Result<()> {
+pub(super) fn emit(output: &mut impl Write, event: JsonValue) -> io::Result<()> {
     serde_json::to_writer(&mut *output, &event).map_err(io::Error::other)?;
     output.write_all(b"\n")?;
     output.flush()
@@ -24,8 +24,9 @@ fn numeric(number: f64) -> JsonValue {
     else { json!(number) }
 }
 
-fn variable(name: &str, value: &Value) -> JsonValue {
+pub(super) fn variable(name: &str, value: &Value) -> JsonValue {
     match value {
+        Value::Bool(_) => json!({"name":name,"kind":"boolean","rows":1,"cols":1,"value":value.to_string(),"preview":[],"truncated":false}),
         Value::Number(number) => json!({"name":name,"kind":"number","rows":1,"cols":1,"value":value.to_string(),"preview":[[numeric(*number)]],"truncated":false}),
         Value::Matrix(matrix) => {
             let (rows, cols) = matrix.shape();
@@ -45,7 +46,7 @@ fn variable(name: &str, value: &Value) -> JsonValue {
     }
 }
 
-fn parse_diagnostic(source: &str, error: &ParseError) -> JsonValue {
+pub(super) fn parse_diagnostic(source: &str, error: &ParseError) -> JsonValue {
     let offset = match error {
         ParseError::UnexpectedToken { offset, .. } | ParseError::LoopControlOutsideLoop { offset, .. } => *offset,
         ParseError::Lex(error) => match error {
@@ -61,6 +62,10 @@ fn parse_diagnostic(source: &str, error: &ParseError) -> JsonValue {
 struct StudioHost<'a, Input: BufRead, Output: Write> { input: &'a mut Input, output: &'a mut Output }
 
 impl<Input: BufRead, Output: Write> RuntimeHost for StudioHost<'_, Input, Output> {
+    fn figure_event(&mut self, event: &sun_runtime::FigureEvent) -> io::Result<()> {
+        emit(self.output, serde_json::to_value(event).map_err(io::Error::other)?)
+    }
+
     fn write_line(&mut self, line: &str) -> io::Result<()> {
         emit(self.output, json!({"type":"output","text":format!("{line}\n")}))
     }
@@ -133,6 +138,30 @@ mod tests {
         let ok = run_source(source, check, &mut io::Cursor::new(input), &mut output).unwrap();
         let records = String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         (ok, records)
+    }
+
+    #[test]
+    fn emits_real_figure_events_and_check_does_not_render() {
+        let mut output = Vec::new();
+        let source = "plot(1:3,4:6); title(\"Signal\"); xlabel(\"Time\"); grid(true);";
+        assert!(run_source(source, false, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap());
+        let events: Vec<JsonValue> = String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let figure = events.iter().find(|event| event["type"] == "figure").unwrap();
+        assert_eq!(figure["figure"]["traces"][0]["x"], json!([1.0,2.0,3.0]));
+        assert_eq!(events.iter().filter(|event| event["type"] == "figure_update").count(), 3);
+        let mut output = Vec::new();
+        assert!(run_source(source, true, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap());
+        assert!(!String::from_utf8(output).unwrap().contains("\"type\":\"figure"));
+    }
+
+    #[test]
+    fn serializes_real_boolean_workspace_values() {
+        let value = variable("enabled", &Value::Bool(true));
+        assert_eq!(value["kind"], "boolean");
+        assert_eq!(value["value"], "true");
+        assert_eq!(value["rows"], 1);
+        assert_eq!(value["cols"], 1);
+        assert_eq!(value["preview"], json!([]));
     }
 
     #[test]

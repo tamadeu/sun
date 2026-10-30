@@ -1,4 +1,5 @@
 mod studio;
+mod studio_session;
 
 use clap::{Parser as ClapParser, Subcommand};
 use crossterm::{
@@ -12,8 +13,8 @@ use std::{
     process::Command as ProcessCommand,
 };
 use sun_lexer::lex;
-use sun_parser::parse;
-use sun_runtime::{execute, execute_with_host, validate_parallel_blocks, RuntimeHost};
+use sun_parser::{parse, ParseError};
+use sun_runtime::{execute_with_host, validate_parallel_blocks, RuntimeHost, Session};
 use sun_codegen_llvm::compile_to_llvm_ir;
 
 #[derive(Debug, ClapParser)]
@@ -91,6 +92,8 @@ enum Command {
     Check { file: PathBuf },
     /// Execute or check source using the Sun Studio JSON event protocol.
     Studio { file: PathBuf, #[arg(long)] check: bool },
+    /// Keep a Sun Studio workspace and accept protocol-v2 requests on stdin.
+    StudioSession,
     /// Print the token stream for a source file.
     Lex { file: PathBuf },
     /// Create a starter Sun source file.
@@ -105,6 +108,56 @@ enum Command {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn repl_defines_multiline_functions_and_calls_them_in_later_commands() {
+        let mut input = io::Cursor::new("function result=square(value)\nlocal=value;\nresult=local*local;\nend\ndisp(square(5));\ntry; disp(local); catch failure; disp(failure.identifier); end\n:clear\nsquare(2);\n:quit\n");
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        repl_with_io(&mut input, &mut output, &mut errors, false).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("...>"));
+        assert!(output.contains("25\n"));
+        assert!(output.contains("Sun:UndefinedVariable"));
+        assert!(String::from_utf8(errors).unwrap().contains("square"));
+    }
+
+    #[test]
+    fn repl_executes_new_commands_without_replaying_history() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut input = io::Cursor::new(b"value = 1; disp(100);\nvalue = value + 1;\ndisp(value);\n:quit\n");
+        repl_with_io(&mut input, &mut output, &mut errors, false).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.matches("100\n").count(), 1);
+        assert!(text.contains("2\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn repl_accumulates_only_the_incomplete_block_and_keeps_state_after_error() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut input = io::Cursor::new(b"value = 0;\nwhile value < 2\nvalue = value + 1;\nend\nerror(\"stop\");\ndisp(value);\n:clear\ndisp(value);\n:quit\n");
+        repl_with_io(&mut input, &mut output, &mut errors, false).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let errors = String::from_utf8(errors).unwrap();
+        assert!(text.contains("...>"));
+        assert!(text.contains("2\n"));
+        assert!(text.contains("Workspace cleared."));
+        assert!(errors.contains("stop"));
+        assert!(errors.contains("undefined variable 'value'"));
+    }
+
+    #[test]
+    fn repl_pause_consumes_input_without_executing_it_as_source() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut input = io::Cursor::new(b"value = 7; pause(); value = value + 1;\n\ndisp(value);\n:quit\n");
+        repl_with_io(&mut input, &mut output, &mut errors, false).unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("8\n"));
+        assert!(errors.is_empty());
+    }
 
     #[test]
     fn pause_accepts_keys_but_ignores_releases_and_non_key_events() {
@@ -174,6 +227,7 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Some(Command::StudioSession) => studio_session::run()?,
         Some(Command::Studio { file, check }) => {
             if !studio::run_file(&file, check)? { std::process::exit(1); }
         }
@@ -259,24 +313,50 @@ fn create_example(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn repl() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Sun interactive session — enter an expression, or type :quit to exit.");
     let stdin = io::stdin();
+    repl_with_io(&mut stdin.lock(), &mut io::stdout().lock(), &mut io::stderr().lock(), stdin.is_terminal())?;
+    Ok(())
+}
+
+struct ReplHost<'a, Input: BufRead, Output: Write> { input: &'a mut Input, output: &'a mut Output, terminal: bool }
+
+impl<Input: BufRead, Output: Write> RuntimeHost for ReplHost<'_, Input, Output> {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        writeln!(self.output, "{line}")?;
+        self.output.flush()
+    }
+    fn wait_for_input(&mut self) -> io::Result<()> {
+        self.output.flush()?;
+        if self.terminal { wait_for_terminal_key() } else { wait_for_input_line(self.input) }
+    }
+}
+
+fn repl_with_io(input: &mut impl BufRead, output: &mut impl Write, errors: &mut impl Write, terminal: bool) -> io::Result<()> {
+    writeln!(output, "Sun interactive session - :quit exits, :clear resets, :cancel discards an unfinished block.")?;
+    let mut host = ReplHost { input, output, terminal };
+    let mut session = Session::new();
     let mut source = String::new();
     loop {
-        print!("sun> ");
-        io::stdout().flush()?;
+        write!(host.output, "{}", if source.is_empty() { "sun> " } else { "...> " })?;
+        host.output.flush()?;
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 { break; }
+        if host.input.read_line(&mut line)? == 0 {
+            if !source.is_empty() { if let Err(error) = parse(&source) { writeln!(errors, "sun: {error}")?; } }
+            break;
+        }
         let input = line.trim();
         if input == ":quit" || input == ":q" { break; }
-        if input.is_empty() { continue; }
+        if input == ":clear" { session.clear(); source.clear(); writeln!(host.output, "Workspace cleared.")?; continue; }
+        if input == ":cancel" { source.clear(); continue; }
+        if input.is_empty() && source.is_empty() { continue; }
         source.push_str(&line);
         match parse(&source) {
-            Ok(module) => match execute(&module) {
-                Ok(results) => if let Some(result) = results.last() { println!("{result}"); },
-                Err(error) => { eprintln!("{error}"); source.clear(); }
-            },
-            Err(error) => { eprintln!("{error}"); source.clear(); }
+            Ok(module) => {
+                if let Err(error) = session.execute(&module, &mut host) { writeln!(errors, "sun: {error}")?; }
+                source.clear();
+            }
+            Err(ParseError::UnexpectedToken { offset, .. }) if offset == source.len() => {}
+            Err(error) => { writeln!(errors, "sun: {error}")?; source.clear(); }
         }
     }
     Ok(())

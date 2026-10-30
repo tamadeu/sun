@@ -1,11 +1,11 @@
 use std::{collections::{BTreeMap, BTreeSet, HashMap}, io, time::Duration};
 use rayon::prelude::*;
-use sun_ast::{Expr, ExprKind, Module, Stmt, StmtKind};
+use sun_ast::{Expr, ExprKind, FunctionDefinition, Module, Stmt, StmtKind};
 use sun_numeric::{MatrixError, SunMatrix};
 use super::{eval, index_number, ExecutionContext, NumericRange, RuntimeError, RuntimeHost, Value};
 
-const PURE_FUNCTIONS: &[&str] = &["sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
-const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow"];
+const PURE_FUNCTIONS: &[&str] = &["sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "mean", "min", "max", "zeros", "ones", "eye", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
+const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "title", "xlabel", "ylabel", "legend", "grid", "axis", "clf"];
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidParFor(message.into()) }
 
@@ -42,7 +42,12 @@ struct Inputs {
 }
 
 impl Inputs {
-    fn validate(&self, env: &HashMap<String, Value>) -> Result<(), RuntimeError> {
+    fn validate(&self, env: &HashMap<String, Value>, functions: &HashMap<String, std::sync::Arc<FunctionDefinition>>) -> Result<(), RuntimeError> {
+        for name in self.optional.iter().chain(&self.matrix_calls) {
+            if functions.contains_key(name) && !matches!(env.get(name), Some(Value::Matrix(_))) {
+                return Err(invalid(format!("user function '{name}' is not supported inside parfor")));
+            }
+        }
         for name in &self.required {
             if !env.contains_key(name) { return Err(RuntimeError::UndefinedVariable(name.clone())); }
         }
@@ -128,7 +133,7 @@ fn validate_expression(expr: &Expr, iterator: &str, temporaries: &BTreeSet<Strin
             if let Some(step) = step { validate_expression(step, iterator, temporaries, initialized, outputs, inputs)?; }
             validate_expression(stop, iterator, temporaries, initialized, outputs, inputs)?;
         }
-        ExprKind::Number(_) | ExprKind::String(_) | ExprKind::IndexEnd | ExprKind::IndexAll => {}
+        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::String(_) | ExprKind::IndexEnd | ExprKind::IndexAll => {}
     }
     Ok(())
 }
@@ -204,6 +209,7 @@ fn validate_statements(statements: &[Stmt]) -> Result<(), RuntimeError> {
                 Plan::analyze(name, body)?;
                 validate_header(start, step.as_ref(), stop)?;
             }
+            StmtKind::Function(function) => validate_statements(&function.body)?,
             StmtKind::For { body, .. } | StmtKind::ForEach { body, .. } | StmtKind::While { body, .. } => validate_statements(body)?,
             StmtKind::If { branches, else_body } => {
                 for (_, body) in branches { validate_statements(body)?; }
@@ -225,6 +231,8 @@ fn validate_statements(statements: &[Stmt]) -> Result<(), RuntimeError> {
 
 struct QuietHost;
 impl RuntimeHost for QuietHost {
+    fn read_file(&mut self, _path: &std::path::Path) -> io::Result<Box<dyn io::Read>> { Err(io::Error::other("parfor workers cannot read files")) }
+    fn write_file_atomic(&mut self, _path: &std::path::Path, _contents: &[u8]) -> io::Result<()> { Err(io::Error::other("parfor workers cannot write files")) }
     fn write_line(&mut self, _line: &str) -> io::Result<()> { Err(io::Error::other("parfor workers cannot write output")) }
     fn pause(&mut self, _duration: Duration) -> io::Result<()> { Err(io::Error::other("parfor workers cannot pause")) }
     fn wait_for_input(&mut self) -> io::Result<()> { Err(io::Error::other("parfor workers cannot read input")) }
@@ -239,13 +247,13 @@ fn integer_bound(expr: &Expr, env: &HashMap<String, Value>, context: &mut Execut
 
 pub(super) fn execute(iterator: &str, start: &Expr, step: Option<&Expr>, stop: &Expr, body: &[Stmt], env: &mut HashMap<String, Value>, context: &mut ExecutionContext<'_>) -> Result<(), RuntimeError> {
     let plan = Plan::analyze(iterator, body)?;
-    validate_header(start, step, stop)?.validate(env)?;
+    validate_header(start, step, stop)?.validate(env, context.functions)?;
     let start = integer_bound(start, env, context)?;
     let step = match step { Some(step) => integer_bound(step, env, context)?, None => 1.0 };
     let stop = integer_bound(stop, env, context)?;
     if step != 1.0 && step != -1.0 { return Err(invalid("step must be 1 or -1")); }
     let range = NumericRange::new(start, step, stop)?;
-    plan.inputs.validate(env)?;
+    plan.inputs.validate(env, context.functions)?;
     for name in &plan.temporaries {
         if env.contains_key(name) { return Err(invalid(format!("temporary '{name}' must not already exist outside parfor"))); }
     }
@@ -265,27 +273,32 @@ pub(super) fn execute(iterator: &str, start: &Expr, step: Option<&Expr>, stop: &
     if range.length == 0 { return Ok(()); }
     let length = usize::try_from(range.length).map_err(|_| invalid("range has too many iterations"))?;
     let workers = rayon::current_num_threads().min(length);
+    context.check_cancelled()?;
+    let cancelled = context.cancelled.clone();
+    let functions = context.functions;
     let globals: &HashMap<String, Value> = env;
     let staged: Vec<Vec<Write>> = (0..workers).into_par_iter().map(|worker| -> Result<Vec<Write>, RuntimeError> {
         let mut locals = plan.inputs.snapshot(globals);
         let mut host = QuietHost;
-        let mut context = ExecutionContext { host: &mut host, pause_enabled: false, index_end: None };
+        let mut graphics = super::graphics::GraphicsState::default();
+        let mut context = ExecutionContext { host: &mut host, pause_enabled: false, index_end: None, cancelled: cancelled.clone(), functions, call_depth: 0, graphics: &mut graphics };
         let mut writes = Vec::new();
         for offset in (worker..length).step_by(workers) {
+            context.check_cancelled()?;
             for temporary in &plan.temporaries { locals.remove(temporary); }
             let value = range.value_at(offset as u64);
             let index = index_number(Value::Number(value), "parallel")?;
             locals.insert(iterator.into(), Value::Number(value));
             for instruction in &plan.instructions {
+                context.check_cancelled()?;
                 match instruction {
                     Instruction::Assign { name, value } => {
                         let value = eval(value, &locals, &mut context)?;
                         locals.insert(name.clone(), value);
                     }
                     Instruction::Write { target, value } => {
-                        let Value::Number(value) = eval(value, &locals, &mut context)? else {
-                            return Err(invalid("output values must be numeric scalars"));
-                        };
+                        let value = eval(value, &locals, &mut context)?;
+                        let value = super::numeric::scalar(&value).ok_or_else(|| invalid("output values must be numeric scalars"))?;
                         writes.push(Write { target: *target, index, value });
                     }
                 }
@@ -293,6 +306,7 @@ pub(super) fn execute(iterator: &str, start: &Expr, step: Option<&Expr>, stop: &
         }
         Ok(writes)
     }).collect::<Result<_, RuntimeError>>()?;
+    context.check_cancelled()?;
     for writes in staged {
         for write in writes {
             let output = &plan.outputs[write.target];

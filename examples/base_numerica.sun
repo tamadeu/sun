@@ -1,0 +1,22 @@
+ativo = true;
+desativado = false;
+amostras = 0:0.5:2;
+raizes = sqrt([1, 4; 9, 16]);
+identidade = eye(2);
+vazia = zeros(0, 3);
+unidades = ones(size(raizes));
+
+disp(ativo && !desativado);
+disp(amostras);
+disp(raizes);
+disp(identidade);
+disp(unidades);
+disp(mean(amostras));
+disp(min(raizes));
+disp(max(raizes));
+disp(max(raizes, 2));
+disp(size(vazia));
+disp(isempty(vazia));
+
+indices = 1:2:4;
+disp(raizes(indices));

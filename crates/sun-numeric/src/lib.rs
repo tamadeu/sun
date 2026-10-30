@@ -1,10 +1,22 @@
 //! Dense f64 matrix primitives. Public Sun indexing is 1-based.
 
-use ndarray::{s, Array2, ArrayView2};
+use ndarray::{s, Array2, ArrayView2, Axis};
 use thiserror::Error;
+
+pub const MAX_MATRIX_ELEMENTS: usize = 16_777_216;
+
+pub fn minimum(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() { f64::NAN } else { left.min(right) }
+}
+
+pub fn maximum(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() { f64::NAN } else { left.max(right) }
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MatrixError {
+    #[error("matrix dimensions or allocation exceed the 16777216-element limit")]
+    SizeLimit,
     #[error("a matrix cannot be empty")]
     Empty,
     #[error("all matrix rows must have the same number of columns")]
@@ -19,10 +31,54 @@ pub enum MatrixError {
     SingularMatrix,
 }
 
+fn checked_elements(rows: usize, cols: usize) -> Result<usize, MatrixError> {
+    let count = rows.checked_mul(cols).ok_or(MatrixError::SizeLimit)?;
+    if rows > MAX_MATRIX_ELEMENTS || cols > MAX_MATRIX_ELEMENTS || count > MAX_MATRIX_ELEMENTS {
+        return Err(MatrixError::SizeLimit);
+    }
+    Ok(count)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SunMatrix { data: Array2<f64> }
 
 impl SunMatrix {
+    pub fn filled(rows: usize, cols: usize, value: f64) -> Result<Self, MatrixError> {
+        let count = checked_elements(rows, cols)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| MatrixError::SizeLimit)?;
+        values.resize(count, value);
+        let data = Array2::from_shape_vec((rows, cols), values).map_err(|_| MatrixError::SizeLimit)?;
+        Ok(Self { data })
+    }
+
+    pub fn identity(rows: usize, cols: usize) -> Result<Self, MatrixError> {
+        let mut matrix = Self::filled(rows, cols, 0.0)?;
+        for index in 0..rows.min(cols) { matrix.data[(index, index)] = 1.0; }
+        Ok(matrix)
+    }
+
+    pub fn concatenate(blocks: &[Self], axis: usize) -> Result<Self, MatrixError> {
+        if axis > 1 { return Err(MatrixError::IncompatibleDimensions); }
+        let views: Vec<_> = blocks.iter().filter(|matrix| matrix.shape() != (0, 0)).map(|matrix| matrix.data.view()).collect();
+        let Some(first) = views.first() else { return Self::filled(0, 0, 0.0); };
+        let mut shape = [first.nrows(), first.ncols()];
+        for view in &views[1..] {
+            let next = [view.nrows(), view.ncols()];
+            if shape[1 - axis] != next[1 - axis] { return Err(MatrixError::IncompatibleDimensions); }
+            shape[axis] = shape[axis].checked_add(next[axis]).ok_or(MatrixError::SizeLimit)?;
+        }
+        checked_elements(shape[0], shape[1])?;
+        let data = ndarray::concatenate(Axis(axis), &views).map_err(|_| MatrixError::IncompatibleDimensions)?;
+        Ok(Self { data })
+    }
+
+    pub fn from_row_major(rows: usize, cols: usize, values: Vec<f64>) -> Result<Self, MatrixError> {
+        if checked_elements(rows, cols)? != values.len() { return Err(MatrixError::IncompatibleDimensions); }
+        let data = Array2::from_shape_vec((rows, cols), values).map_err(|_| MatrixError::IncompatibleDimensions)?;
+        Ok(Self { data })
+    }
+
     pub fn from_rows(rows: Vec<Vec<f64>>) -> Result<Self, MatrixError> {
         let row_count = rows.len();
         let col_count = rows.first().map_or(0, Vec::len);
@@ -43,6 +99,18 @@ impl SunMatrix {
         Self { data: self.data.mapv(transform) }
     }
 
+    pub fn sum(&self) -> f64 { if self.is_empty() { 0.0 } else { self.data.iter().copied().sum() } }
+
+    pub fn mean(&self) -> f64 { self.sum() / self.element_count() as f64 }
+
+    pub fn minimum(&self) -> Option<f64> { self.data.iter().copied().reduce(minimum) }
+
+    pub fn maximum(&self) -> Option<f64> { self.data.iter().copied().reduce(maximum) }
+
+    pub fn pairwise_minimum(&self, other: &Self) -> Result<Self, MatrixError> { self.broadcast_binary(other, minimum) }
+
+    pub fn pairwise_maximum(&self, other: &Self) -> Result<Self, MatrixError> { self.broadcast_binary(other, maximum) }
+
     fn validate_selection(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<(), MatrixError> {
         let (rows, cols) = self.shape();
         for &row in row_indices {
@@ -60,6 +128,7 @@ impl SunMatrix {
 
     pub fn select(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<Self, MatrixError> {
         self.validate_selection(row_indices, column_indices)?;
+        checked_elements(row_indices.len(), column_indices.len())?;
         let data = Array2::from_shape_fn((row_indices.len(), column_indices.len()), |(row, col)| {
             self.data[(row_indices[row] - 1, column_indices[col] - 1)]
         });
@@ -207,6 +276,7 @@ impl SunMatrix {
         }
         let rows = if ar == 1 { br } else { ar };
         let cols = if ac == 1 { bc } else { ac };
+        checked_elements(rows, cols)?;
         let data = Array2::from_shape_fn((rows, cols), |(row, col)| {
             f(self.data[(if ar == 1 { 0 } else { row }, if ac == 1 { 0 } else { col })],
               other.data[(if br == 1 { 0 } else { row }, if bc == 1 { 0 } else { col })])
@@ -226,6 +296,7 @@ impl SunMatrix {
 
     pub fn matmul(&self, other: &Self) -> Result<Self, MatrixError> {
         if self.data.ncols() != other.data.nrows() { return Err(MatrixError::IncompatibleDimensions); }
+        checked_elements(self.data.nrows(), other.data.ncols())?;
         Ok(Self { data: self.data.dot(&other.data) })
     }
 
