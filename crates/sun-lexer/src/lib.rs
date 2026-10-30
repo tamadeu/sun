@@ -53,7 +53,6 @@ impl Lexer<'_> {
                 '"' | '\'' => self.string(start, ch)?,
                 '+' => { self.bump(); self.push(TokenKind::Plus, start); }
                 '-' => { self.bump(); self.push(TokenKind::Minus, start); }
-                '*' if self.peek_next() == Some('.') => { self.bump(); self.bump(); self.push(TokenKind::DotStar, start); }
                 '*' => { self.bump(); self.push(TokenKind::Star, start); }
                 '.' if self.peek_next() == Some('*') => { self.bump(); self.bump(); self.push(TokenKind::DotStar, start); }
                 '.' if self.peek_next() == Some('/') => { self.bump(); self.bump(); self.push(TokenKind::DotSlash, start); }
