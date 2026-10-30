@@ -1,0 +1,30 @@
+entradas = [1, 2, 3, 4; 10, 20, 30, 40];
+quadrados = [0, 0, 0, 0];
+somas = [0; 0; 0; 0];
+limite = 4;
+
+parfor indice = 1:limite
+    valor = entradas(1, indice);
+    quadrados(indice) = valor * valor;
+    somas(indice, 1) = sum(entradas(:, indice));
+end
+
+disp("Quadrados por coluna:");
+disp(quadrados);
+disp("Somas por coluna:");
+disp(somas);
+disp("Soma dos quadrados apos parfor:");
+disp(sum(quadrados));
+disp("Entrada preservada:");
+disp(entradas);
+
+saida_com_falha = [0, 0, 0, 0];
+try
+    parfor indice = 1:limite
+        saida_com_falha(indice) = entradas(1, indice + 1);
+    end
+catch erro
+    disp(erro.identifier);
+end
+disp("Saida apos falha:");
+disp(saida_com_falha);

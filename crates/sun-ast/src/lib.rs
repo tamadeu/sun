@@ -20,6 +20,7 @@ pub enum StmtKind {
     LinearIndexAssign { name: String, index: Expr, value: Expr },
     While { condition: Expr, body: Vec<Stmt> },
     For { name: String, start: Expr, step: Option<Expr>, stop: Expr, body: Vec<Stmt> },
+    ParFor { name: String, start: Expr, step: Option<Expr>, stop: Expr, body: Vec<Stmt> },
     ForEach { name: String, source: Expr, body: Vec<Stmt> },
     If { branches: Vec<(Expr, Vec<Stmt>)>, else_body: Vec<Stmt> },
     Switch { selector: Expr, cases: Vec<(Expr, Vec<Stmt>)>, otherwise_body: Vec<Stmt> },

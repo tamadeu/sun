@@ -26,7 +26,6 @@ impl SunMatrix {
     pub fn from_rows(rows: Vec<Vec<f64>>) -> Result<Self, MatrixError> {
         let row_count = rows.len();
         let col_count = rows.first().map_or(0, Vec::len);
-        if row_count == 0 || col_count == 0 { return Err(MatrixError::Empty); }
         if rows.iter().any(|row| row.len() != col_count) { return Err(MatrixError::RaggedRows); }
         let flat = rows.into_iter().flatten().collect();
         let data = Array2::from_shape_vec((row_count, col_count), flat)
@@ -38,23 +37,101 @@ impl SunMatrix {
 
     pub fn element_count(&self) -> usize { self.data.len() }
 
-    pub fn select(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<Self, MatrixError> {
-        if row_indices.is_empty() || column_indices.is_empty() { return Err(MatrixError::Empty); }
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
+    pub fn map(&self, transform: impl Fn(f64) -> f64) -> Self {
+        Self { data: self.data.mapv(transform) }
+    }
+
+    fn validate_selection(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<(), MatrixError> {
         let (rows, cols) = self.shape();
         for &row in row_indices {
             if row == 0 || row > rows {
-                return Err(MatrixError::IndexOutOfBounds { row, col: column_indices[0], rows, cols });
+                return Err(MatrixError::IndexOutOfBounds { row, col: column_indices.first().copied().unwrap_or(1), rows, cols });
             }
         }
         for &col in column_indices {
             if col == 0 || col > cols {
-                return Err(MatrixError::IndexOutOfBounds { row: row_indices[0], col, rows, cols });
+                return Err(MatrixError::IndexOutOfBounds { row: row_indices.first().copied().unwrap_or(1), col, rows, cols });
             }
         }
+        Ok(())
+    }
+
+    pub fn select(&self, row_indices: &[usize], column_indices: &[usize]) -> Result<Self, MatrixError> {
+        self.validate_selection(row_indices, column_indices)?;
         let data = Array2::from_shape_fn((row_indices.len(), column_indices.len()), |(row, col)| {
             self.data[(row_indices[row] - 1, column_indices[col] - 1)]
         });
         Ok(Self { data })
+    }
+
+    pub fn fill_selection(&mut self, row_indices: &[usize], column_indices: &[usize], value: f64) -> Result<(), MatrixError> {
+        self.validate_selection(row_indices, column_indices)?;
+        for &col in column_indices {
+            for &row in row_indices { self.data[(row - 1, col - 1)] = value; }
+        }
+        Ok(())
+    }
+
+    pub fn assign_selection(&mut self, row_indices: &[usize], column_indices: &[usize], values: &Self) -> Result<(), MatrixError> {
+        self.validate_selection(row_indices, column_indices)?;
+        let scalar = values.shape() == (1, 1);
+        if row_indices.is_empty() || column_indices.is_empty() {
+            return if scalar || values.is_empty() { Ok(()) } else { Err(MatrixError::IncompatibleDimensions) };
+        }
+        if !scalar && values.shape() != (row_indices.len(), column_indices.len()) {
+            return Err(MatrixError::IncompatibleDimensions);
+        }
+        for (col_offset, &col) in column_indices.iter().enumerate() {
+            for (row_offset, &row) in row_indices.iter().enumerate() {
+                let value = if scalar { values.data[(0, 0)] } else { values.data[(row_offset, col_offset)] };
+                self.data[(row - 1, col - 1)] = value;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_linear_selection(&self, indices: &[usize]) -> Result<(), MatrixError> {
+        for &index in indices { self.linear_coordinates(index)?; }
+        Ok(())
+    }
+
+    pub fn select_linear(&self, indices: &[usize], force_column: bool) -> Result<Self, MatrixError> {
+        self.validate_linear_selection(indices)?;
+        let rows = self.data.nrows();
+        let column = force_column || self.data.ncols() == 1;
+        let shape = if column { (indices.len(), 1) } else { (1, indices.len()) };
+        let data = Array2::from_shape_fn(shape, |(row, col)| {
+            let position = if column { row } else { col };
+            let offset = indices[position] - 1;
+            self.data[(offset % rows, offset / rows)]
+        });
+        Ok(Self { data })
+    }
+
+    pub fn fill_linear_selection(&mut self, indices: &[usize], value: f64) -> Result<(), MatrixError> {
+        self.validate_linear_selection(indices)?;
+        let rows = self.data.nrows();
+        for &index in indices {
+            let offset = index - 1;
+            self.data[(offset % rows, offset / rows)] = value;
+        }
+        Ok(())
+    }
+
+    pub fn assign_linear_selection(&mut self, indices: &[usize], values: &Self) -> Result<(), MatrixError> {
+        self.validate_linear_selection(indices)?;
+        let scalar = values.element_count() == 1;
+        if !scalar && values.element_count() != indices.len() { return Err(MatrixError::IncompatibleDimensions); }
+        let rows = self.data.nrows();
+        let source_rows = values.data.nrows();
+        for (position, &index) in indices.iter().enumerate() {
+            let source_offset = if scalar { 0 } else { position };
+            let offset = index - 1;
+            self.data[(offset % rows, offset / rows)] = values.data[(source_offset % source_rows, source_offset / source_rows)];
+        }
+        Ok(())
     }
 
     fn linear_coordinates(&self, index: usize) -> Result<(usize, usize), MatrixError> {
@@ -128,18 +205,13 @@ impl SunMatrix {
         if (ar != br && ar != 1 && br != 1) || (ac != bc && ac != 1 && bc != 1) {
             return Err(MatrixError::IncompatibleDimensions);
         }
-        let rows = ar.max(br);
-        let cols = ac.max(bc);
-        let mut values = Vec::with_capacity(rows);
-        for r in 0..rows {
-            let mut row = Vec::with_capacity(cols);
-            for c in 0..cols {
-                row.push(f(self.data[(if ar == 1 { 0 } else { r }, if ac == 1 { 0 } else { c })],
-                           other.data[(if br == 1 { 0 } else { r }, if bc == 1 { 0 } else { c })]));
-            }
-            values.push(row);
-        }
-        Self::from_rows(values)
+        let rows = if ar == 1 { br } else { ar };
+        let cols = if ac == 1 { bc } else { ac };
+        let data = Array2::from_shape_fn((rows, cols), |(row, col)| {
+            f(self.data[(if ar == 1 { 0 } else { row }, if ac == 1 { 0 } else { col })],
+              other.data[(if br == 1 { 0 } else { row }, if bc == 1 { 0 } else { col })])
+        });
+        Ok(Self { data })
     }
 
     pub fn add(&self, other: &Self) -> Result<Self, MatrixError> {
@@ -159,10 +231,7 @@ impl SunMatrix {
 
     /// Returns a materialized transpose (distinct from the zero-copy MatrixView transpose).
     pub fn transpose(&self) -> Result<Self, MatrixError> {
-        let (rows, cols) = self.shape();
-        let mut out = vec![vec![0.0; rows]; cols];
-        for r in 0..rows { for c in 0..cols { out[c][r] = self.data[(r, c)]; } }
-        Self::from_rows(out)
+        Ok(Self { data: self.data.t().to_owned() })
     }
 
     /// Computes the determinant using Gaussian elimination with partial pivoting.
@@ -189,6 +258,7 @@ impl SunMatrix {
         let (n, cols) = self.shape();
         let (rhs_rows, rhs_cols) = rhs.shape();
         if n != cols || rhs_rows != n { return Err(MatrixError::IncompatibleDimensions); }
+        if n == 0 || rhs_cols == 0 { return Ok(rhs.clone()); }
         let mut a = self.to_rows();
         let mut b = rhs.to_rows();
         for col in 0..n {
@@ -251,6 +321,174 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     #[test]
+    fn constructs_empty_matrices_and_preserves_empty_selection_shapes() {
+        let empty = SunMatrix::from_rows(Vec::new()).unwrap();
+        assert_eq!(empty.shape(), (0, 0));
+        assert_eq!(empty.element_count(), 0);
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        assert_eq!(matrix.select(&[], &[1, 2]).unwrap().shape(), (0, 2));
+        assert_eq!(matrix.select(&[1, 2], &[]).unwrap().shape(), (2, 0));
+        assert_eq!(SunMatrix::from_rows(vec![vec![], vec![]]).unwrap().shape(), (2, 0));
+        assert_eq!(SunMatrix::from_rows(vec![vec![], vec![1.0]]).unwrap_err(), MatrixError::RaggedRows);
+    }
+
+    #[test]
+    fn empty_matrices_preserve_shape_through_transpose_and_map() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        let zero_rows = matrix.select(&[], &[1, 2]).unwrap();
+        let zero_cols = matrix.select(&[1, 2], &[]).unwrap();
+        assert!(zero_rows.is_empty());
+        assert_eq!(zero_rows.transpose().unwrap().shape(), (2, 0));
+        assert_eq!(zero_cols.transpose().unwrap().shape(), (0, 2));
+        assert_eq!(zero_rows.map(|_| panic!("empty map must not visit elements")).shape(), (0, 2));
+        assert_eq!(zero_cols.map(|value| value * 2.0).shape(), (2, 0));
+        assert_eq!(zero_rows.select_linear(&[], true).unwrap().shape(), (0, 1));
+        assert_eq!(zero_rows.select_linear(&[], false).unwrap().shape(), (1, 0));
+    }
+
+    #[test]
+    fn empty_broadcasting_preserves_zero_dimensions() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        let zero_rows = matrix.select(&[], &[1, 2]).unwrap();
+        let zero_cols = matrix.select(&[1, 2], &[]).unwrap();
+        let row = matrix.select(&[1], &[1, 2]).unwrap();
+        let column = matrix.select(&[1, 2], &[1]).unwrap();
+        let scalar = SunMatrix::from_rows(vec![vec![2.0]]).unwrap();
+        assert_eq!(zero_rows.broadcast_add(&row).unwrap().shape(), (0, 2));
+        assert_eq!(row.broadcast_subtract(&zero_rows).unwrap().shape(), (0, 2));
+        assert_eq!(zero_rows.broadcast_elementwise_mul(&scalar).unwrap().shape(), (0, 2));
+        assert_eq!(scalar.broadcast_add(&zero_rows).unwrap().shape(), (0, 2));
+        assert_eq!(zero_cols.broadcast_add(&column).unwrap().shape(), (2, 0));
+        assert_eq!(column.broadcast_elementwise_mul(&zero_cols).unwrap().shape(), (2, 0));
+        assert_eq!(zero_rows.broadcast_add(&matrix).unwrap_err(), MatrixError::IncompatibleDimensions);
+    }
+
+    #[test]
+    fn empty_multiplication_and_linear_algebra_preserve_shapes() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        let zero_rows = matrix.select(&[], &[1, 2]).unwrap();
+        let zero_cols = matrix.select(&[1, 2], &[]).unwrap();
+        assert_eq!(zero_cols.matmul(&zero_rows).unwrap().to_rows(), vec![vec![0.0, 0.0], vec![0.0, 0.0]]);
+        assert_eq!(zero_rows.matmul(&matrix).unwrap().shape(), (0, 2));
+        assert_eq!(matrix.matmul(&zero_cols).unwrap().shape(), (2, 0));
+        let empty = SunMatrix::from_rows(Vec::new()).unwrap();
+        assert_eq!(empty.determinant().unwrap(), 1.0);
+        assert_eq!(empty.inverse().unwrap().shape(), (0, 0));
+        assert_eq!(empty.solve(&zero_rows).unwrap().shape(), (0, 2));
+        assert_eq!(matrix.solve(&zero_cols).unwrap().shape(), (2, 0));
+        assert_eq!(zero_rows.determinant().unwrap_err(), MatrixError::IncompatibleDimensions);
+    }
+
+    #[test]
+    fn empty_selections_accept_scalar_or_empty_writes_without_mutation() {
+        let original = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        let mut matrix = original.clone();
+        let empty = SunMatrix::from_rows(Vec::new()).unwrap();
+        matrix.fill_selection(&[], &[1, 2], 99.0).unwrap();
+        matrix.assign_selection(&[], &[1, 2], &empty).unwrap();
+        matrix.fill_linear_selection(&[], 99.0).unwrap();
+        matrix.assign_linear_selection(&[], &empty).unwrap();
+        assert_eq!(matrix, original);
+        assert_eq!(matrix.assign_selection(&[], &[1], &original).unwrap_err(), MatrixError::IncompatibleDimensions);
+        assert_eq!(matrix.assign_linear_selection(&[], &original).unwrap_err(), MatrixError::IncompatibleDimensions);
+        assert_eq!(matrix, original);
+    }
+
+    #[test]
+    fn empty_axes_do_not_bypass_validation_of_other_indices() {
+        let empty = SunMatrix::from_rows(Vec::new()).unwrap();
+        assert!(empty.get(1, 1).is_err());
+        assert!(empty.get_linear(1).is_err());
+        assert!(empty.select(&[1], &[]).is_err());
+        assert!(empty.select(&[], &[1]).is_err());
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        assert!(matrix.select(&[], &[3]).is_err());
+        assert!(matrix.select(&[3], &[]).is_err());
+    }
+
+    #[test]
+    fn linear_selections_preserve_column_order_and_result_orientation() {
+        let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        assert_eq!(matrix.select_linear(&[6, 2, 3], false).unwrap().to_rows(), vec![vec![6.0, 4.0, 2.0]]);
+        let mut column = matrix.select_linear(&[6, 2, 3], true).unwrap();
+        assert_eq!(column.to_rows(), vec![vec![6.0], vec![4.0], vec![2.0]]);
+        column.set(1, 1, 99.0).unwrap();
+        assert_eq!(matrix.get_linear(6).unwrap(), 6.0);
+        let row = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0]]).unwrap();
+        assert_eq!(row.select_linear(&[3, 1], false).unwrap().shape(), (1, 2));
+        assert_eq!(row.select_linear(&[3, 1], true).unwrap().shape(), (2, 1));
+        let column = SunMatrix::from_rows(vec![vec![1.0], vec![2.0], vec![3.0]]).unwrap();
+        assert_eq!(column.select_linear(&[3, 1], false).unwrap().to_rows(), vec![vec![3.0], vec![1.0]]);
+    }
+
+    #[test]
+    fn linear_selection_assignment_uses_rhs_column_order_and_preserves_target_shape() {
+        let mut matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        let values = SunMatrix::from_rows(vec![vec![60.0, 20.0], vec![30.0, 10.0]]).unwrap();
+        matrix.assign_linear_selection(&[6, 2, 3, 1], &values).unwrap();
+        assert_eq!(matrix.to_rows(), vec![vec![10.0, 20.0, 3.0], vec![30.0, 5.0, 60.0]]);
+        matrix.fill_linear_selection(&[1, 5], 9.0).unwrap();
+        let scalar = SunMatrix::from_rows(vec![vec![0.0]]).unwrap();
+        matrix.assign_linear_selection(&[2, 3], &scalar).unwrap();
+        assert_eq!(matrix.shape(), (2, 3));
+        assert_eq!(matrix.to_rows(), vec![vec![9.0, 0.0, 9.0], vec![0.0, 5.0, 60.0]]);
+    }
+
+    #[test]
+    fn linear_selection_errors_do_not_partially_mutate_target() {
+        let original = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        let scalar = SunMatrix::from_rows(vec![vec![99.0]]).unwrap();
+        for indices in [vec![1, 2, 7], vec![1, 0], vec![1, usize::MAX]] {
+            let mut matrix = original.clone();
+            assert!(matrix.select_linear(&indices, false).is_err());
+            assert!(matrix.fill_linear_selection(&indices, 99.0).is_err());
+            assert_eq!(matrix, original);
+            assert!(matrix.assign_linear_selection(&indices, &scalar).is_err());
+            assert_eq!(matrix, original);
+        }
+        let mut matrix = original.clone();
+        let wrong_count = SunMatrix::from_rows(vec![vec![7.0, 8.0]]).unwrap();
+        assert_eq!(matrix.assign_linear_selection(&[1, 2, 3], &wrong_count).unwrap_err(), MatrixError::IncompatibleDimensions);
+        assert_eq!(matrix, original);
+    }
+
+    #[test]
+    fn fills_selected_coordinates_without_changing_shape() {
+        let mut matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        matrix.fill_selection(&[2, 1], &[3, 1], 0.0).unwrap();
+        assert_eq!(matrix.shape(), (2, 3));
+        assert_eq!(matrix.to_rows(), vec![vec![0.0, 2.0, 0.0], vec![0.0, 5.0, 0.0]]);
+    }
+
+    #[test]
+    fn assigns_in_requested_order_and_expands_singleton_values() {
+        let mut matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        let values = SunMatrix::from_rows(vec![vec![60.0, 40.0], vec![30.0, 10.0]]).unwrap();
+        matrix.assign_selection(&[2, 1], &[3, 1], &values).unwrap();
+        assert_eq!(matrix.to_rows(), vec![vec![10.0, 2.0, 30.0], vec![40.0, 5.0, 60.0]]);
+        let scalar = SunMatrix::from_rows(vec![vec![9.0]]).unwrap();
+        matrix.assign_selection(&[1, 2], &[2], &scalar).unwrap();
+        assert_eq!(matrix.to_rows(), vec![vec![10.0, 9.0, 30.0], vec![40.0, 9.0, 60.0]]);
+    }
+
+    #[test]
+    fn selection_assignment_errors_do_not_partially_mutate_target() {
+        let original = SunMatrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        let scalar = SunMatrix::from_rows(vec![vec![99.0]]).unwrap();
+        for (rows, cols) in [(vec![1, 3], vec![1]), (vec![1], vec![1, 4])] {
+            let mut matrix = original.clone();
+            assert!(matrix.fill_selection(&rows, &cols, 99.0).is_err());
+            assert_eq!(matrix, original);
+            assert!(matrix.assign_selection(&rows, &cols, &scalar).is_err());
+            assert_eq!(matrix, original);
+        }
+        let mut matrix = original.clone();
+        let wrong_shape = SunMatrix::from_rows(vec![vec![7.0, 8.0]]).unwrap();
+        assert_eq!(matrix.assign_selection(&[1, 2], &[3], &wrong_shape).unwrap_err(), MatrixError::IncompatibleDimensions);
+        assert_eq!(matrix, original);
+    }
+
+    #[test]
     fn selects_rows_and_columns_in_requested_order_without_aliasing() {
         let matrix = SunMatrix::from_rows(vec![vec![11.0, 12.0, 13.0, 14.0], vec![21.0, 22.0, 23.0, 24.0], vec![31.0, 32.0, 33.0, 34.0]]).unwrap();
         let mut selected = matrix.select(&[3, 1], &[4, 2]).unwrap();
@@ -264,10 +502,10 @@ mod tests {
     }
 
     #[test]
-    fn selection_rejects_empty_and_out_of_bounds_axes() {
+    fn selection_rejects_out_of_bounds_axes() {
         let matrix = SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
-        assert_eq!(matrix.select(&[], &[1]).unwrap_err(), MatrixError::Empty);
-        assert_eq!(matrix.select(&[1], &[]).unwrap_err(), MatrixError::Empty);
+        assert_eq!(matrix.select(&[], &[1]).unwrap().shape(), (0, 1));
+        assert_eq!(matrix.select(&[1], &[]).unwrap().shape(), (1, 0));
         for (rows, cols) in [(vec![0], vec![1]), (vec![3], vec![1]), (vec![1], vec![0]), (vec![1], vec![3])] {
             assert!(matches!(matrix.select(&rows, &cols), Err(MatrixError::IndexOutOfBounds { .. })));
         }

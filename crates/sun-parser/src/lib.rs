@@ -51,7 +51,8 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek().span.start;
-        if matches!(self.peek().kind, TokenKind::For) {
+        if matches!(self.peek().kind, TokenKind::For | TokenKind::ParFor) {
+            let parallel = matches!(self.peek().kind, TokenKind::ParFor);
             self.advance();
             let token = self.expect(|kind| matches!(kind, TokenKind::Ident(_)), "loop variable after for")?;
             let TokenKind::Ident(name) = token.kind else { unreachable!() };
@@ -66,16 +67,20 @@ impl Parser {
                 } else { (None, next) };
                 Some((step, stop))
             } else { None };
+            if parallel && range.is_none() {
+                return Err(ParseError::UnexpectedToken { offset: self.peek().span.start, expected: "start:stop or start:step:stop range in parfor" });
+            }
             self.expect(|kind| matches!(kind, TokenKind::Newline | TokenKind::Semicolon), "newline or semicolon after for source")?;
             self.loop_depth += 1;
             let body = self.block(&[TokenKind::End]);
             self.loop_depth -= 1;
             let body = body?;
             let kind = match range {
+                Some((step, stop)) if parallel => StmtKind::ParFor { name, start: source, step, stop, body },
                 Some((step, stop)) => StmtKind::For { name, start: source, step, stop, body },
                 None => StmtKind::ForEach { name, source, body },
             };
-            return self.close_block(start, kind, "end to close for block");
+            return self.close_block(start, kind, if parallel { "end to close parfor block" } else { "end to close for block" });
         }
         if matches!(self.peek().kind, TokenKind::While) {
             self.advance();
@@ -344,6 +349,28 @@ fn infix_binding_power(kind: &TokenKind) -> Option<(u8, u8, BinaryOp)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_parfor_range_as_one_statement() {
+        let source = "parfor index = 1:4\n output(index) = index * index;\nend";
+        let module = parse(source).unwrap();
+        assert_eq!(module.statements.len(), 1);
+        let StmtKind::ParFor { name, step, body, .. } = &module.statements[0].kind else { panic!("expected parfor") };
+        assert_eq!(name, "index");
+        assert!(step.is_none());
+        assert_eq!(body.len(), 1);
+        assert_eq!(module.statements[0].span, Span::new(0, source.len()));
+        assert!(parse("parfor index = 3:-1:1; output(index, 1) = index; end").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_parfor_headers_and_unclosed_blocks() {
+        for source in ["parfor = 1:3; end", "parfor index 1:3; end", "parfor index = [1, 2]; end",
+            "parfor index = 1; end", "parfor index = 1:; end", "parfor index = 1:3\n",
+            "parfor index = 1:3 disp(index); end", "parfor(index = 1:3); end"] {
+            assert!(parse(source).is_err(), "unexpectedly accepted {source:?}");
+        }
+    }
 
     #[test]
     fn parses_bidimensional_slices() {

@@ -11,7 +11,7 @@ use std::{
 };
 use sun_lexer::lex;
 use sun_parser::parse;
-use sun_runtime::{execute, execute_with_host, RuntimeHost};
+use sun_runtime::{execute, execute_with_host, validate_parallel_blocks, RuntimeHost};
 use sun_codegen_llvm::compile_to_llvm_ir;
 
 #[derive(Debug, ClapParser)]
@@ -180,6 +180,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Check { file }) => {
             let source = fs::read_to_string(&file)?;
             let module = parse(&source)?;
+            validate_parallel_blocks(&module)?;
             println!("Syntax OK: {} statement(s)", module.statements.len());
         }
         Some(Command::Lex { file }) => {

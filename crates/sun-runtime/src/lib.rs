@@ -1,5 +1,7 @@
 //! Initial interpreter/runtime for Sun 0.1.
 
+mod parallel;
+
 use std::{collections::HashMap, io, time::Duration};
 use sun_ast::{BinaryOp, Expr, ExprKind, Module, Stmt, StmtKind, UnaryOp};
 use sun_numeric::{MatrixError, SunMatrix};
@@ -27,6 +29,7 @@ impl std::fmt::Display for Value {
             Self::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => write!(f, "{n:.0}"),
             Self::Number(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "{s}"),
+            Self::Matrix(matrix) if matrix.is_empty() => write!(f, "[]"),
             Self::Matrix(m) => {
                 write!(f, "[")?;
                 for (ri, row) in m.to_rows().iter().enumerate() {
@@ -57,6 +60,8 @@ pub enum RuntimeError {
     InvalidForRange(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    #[error("invalid parfor: {0}")]
+    InvalidParFor(String),
     #[error(transparent)]
     Exception(#[from] SunException),
     #[error("runtime I/O error: {0}")]
@@ -73,6 +78,7 @@ impl RuntimeError {
             Self::Arity(_, _) => "Sun:InvalidArgumentCount",
             Self::InvalidForRange(_) => "Sun:InvalidForRange",
             Self::InvalidArgument(_) => "Sun:InvalidArgument",
+            Self::InvalidParFor(_) => "Sun:InvalidParFor",
             Self::Io(_) => "Sun:IOError",
             Self::Exception(exception) => &exception.identifier,
             Self::Matrix(error) => match error {
@@ -139,7 +145,12 @@ pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
     Ok(host.lines)
 }
 
+pub fn validate_parallel_blocks(module: &Module) -> Result<(), RuntimeError> {
+    parallel::validate_module(module)
+}
+
 pub fn execute_with_host(module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
+    validate_parallel_blocks(module)?;
     let mut env = HashMap::<String, Value>::new();
     let mut context = ExecutionContext { host, pause_enabled: true, index_end: None };
     match execute_statements(&module.statements, &mut env, &mut context)? {
@@ -222,12 +233,25 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                 if !statement.suppress_output { output.write_line(&format!("{name} = {result}"))?; }
             }
             StmtKind::LinearIndexAssign { name, index, value } => {
-                let elements = match env.get(name) {
-                    Some(Value::Matrix(matrix)) => matrix.element_count(),
+                let (shape, elements) = match env.get(name) {
+                    Some(Value::Matrix(matrix)) => (matrix.shape(), matrix.element_count()),
                     Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 };
-                if is_slice_index(index) { return Err(RuntimeError::Unsupported("slice assignment is not supported yet".into())); }
+                if is_slice_index(index) {
+                    let indices = eval_selection(index, env, output, IndexAxis::Linear, shape)?;
+                    let value = eval(value, env, output)?;
+                    match env.get_mut(name) {
+                        Some(Value::Matrix(matrix)) => match value {
+                            Value::Number(number) => matrix.fill_linear_selection(&indices, number)?,
+                            Value::Matrix(values) => matrix.assign_linear_selection(&indices, &values)?,
+                            other => return Err(RuntimeError::Unsupported(format!("linear slice assignment value must be a number or matrix, got {other}"))),
+                        },
+                        Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                        None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                    }
+                    continue;
+                }
                 let index = eval_index(index, env, output, "linear", elements)?;
                 let value = match eval(value, env, output)? {
                     Value::Number(number) => number,
@@ -246,7 +270,19 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 };
                 if is_slice_index(row) || is_slice_index(col) {
-                    return Err(RuntimeError::Unsupported("slice assignment is not supported yet".into()));
+                    let row_indices = eval_selection(row, env, output, IndexAxis::Row, (rows, cols))?;
+                    let column_indices = eval_selection(col, env, output, IndexAxis::Column, (rows, cols))?;
+                    let value = eval(value, env, output)?;
+                    match env.get_mut(name) {
+                        Some(Value::Matrix(matrix)) => match value {
+                            Value::Number(number) => matrix.fill_selection(&row_indices, &column_indices, number)?,
+                            Value::Matrix(values) => matrix.assign_selection(&row_indices, &column_indices, &values)?,
+                            other => return Err(RuntimeError::Unsupported(format!("slice assignment value must be a number or matrix, got {other}"))),
+                        },
+                        Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                        None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                    }
+                    continue;
                 }
                 let row = eval_index(row, env, output, "row", rows)?;
                 let col = eval_index(col, env, output, "column", cols)?;
@@ -259,6 +295,9 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                     Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
                     None => return Err(RuntimeError::UndefinedVariable(name.clone())),
                 }
+            }
+            StmtKind::ParFor { name, start, step, stop, body } => {
+                parallel::execute(name, start, step.as_ref(), stop, body, env, output)?;
             }
             StmtKind::For { name, start, step, stop, body } => {
                 let start = for_scalar(eval(start, env, output)?)?;
@@ -293,6 +332,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
                         }
                     }
                     Value::Matrix(matrix) => {
+                        if matrix.is_empty() { continue; }
                         let (rows, cols) = matrix.shape();
                         for column in 1..=cols {
                             let value = if rows == 1 {
@@ -368,7 +408,7 @@ fn execute_statements(statements: &[Stmt], env: &mut HashMap<String, Value>, out
     Ok(ExecutionFlow::Normal)
 }
 
-fn eval_index(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: &str, dimension: usize) -> Result<usize, RuntimeError> {
+fn eval_index(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: &str, dimension: usize) -> Result<usize, RuntimeError> {
     let previous = output.index_end.replace(dimension);
     let result = eval(expr, env, output);
     output.index_end = previous;
@@ -387,7 +427,7 @@ fn is_slice_index(expr: &Expr) -> bool {
 }
 
 #[derive(Clone, Copy)]
-enum IndexAxis { Row, Column }
+enum IndexAxis { Row, Column, Linear }
 
 fn slice_integer(value: Value, component: &str) -> Result<f64, RuntimeError> {
     match value {
@@ -396,8 +436,12 @@ fn slice_integer(value: Value, component: &str) -> Result<f64, RuntimeError> {
     }
 }
 
-fn eval_selection(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: IndexAxis, shape: (usize, usize)) -> Result<Vec<usize>, RuntimeError> {
-    let (label, dimension) = match axis { IndexAxis::Row => ("row", shape.0), IndexAxis::Column => ("column", shape.1) };
+fn eval_selection(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, axis: IndexAxis, shape: (usize, usize)) -> Result<Vec<usize>, RuntimeError> {
+    let (label, dimension) = match axis {
+        IndexAxis::Row => ("row", shape.0),
+        IndexAxis::Column => ("column", shape.1),
+        IndexAxis::Linear => ("linear", shape.0 * shape.1),
+    };
     match &expr.kind {
         ExprKind::IndexAll => Ok((1..=dimension).collect()),
         ExprKind::IndexRange { start, step, stop } => {
@@ -417,8 +461,12 @@ fn eval_selection(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Ex
                 let checked_index = |number: f64| -> Result<usize, RuntimeError> {
                     let index = index_number(Value::Number(number), label)?;
                     if index > dimension {
-                        let (row, col) = match axis { IndexAxis::Row => (index, 1), IndexAxis::Column => (1, index) };
-                        return Err(MatrixError::IndexOutOfBounds { row, col, rows: shape.0, cols: shape.1 }.into());
+                        let error = match axis {
+                            IndexAxis::Row => MatrixError::IndexOutOfBounds { row: index, col: 1, rows: shape.0, cols: shape.1 },
+                            IndexAxis::Column => MatrixError::IndexOutOfBounds { row: 1, col: index, rows: shape.0, cols: shape.1 },
+                            IndexAxis::Linear => MatrixError::LinearIndexOutOfBounds { index, elements: dimension },
+                        };
+                        return Err(error.into());
                     }
                     Ok(index)
                 };
@@ -444,13 +492,13 @@ fn eval_selection(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Ex
     }
 }
 
-fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
+fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
     match &expr.kind {
         ExprKind::Number(n) => Ok(Value::Number(*n)),
         ExprKind::String(s) => Ok(Value::String(s.clone())),
         ExprKind::IndexEnd => output.index_end.map(|dimension| Value::Number(dimension as f64))
             .ok_or_else(|| RuntimeError::InvalidArgument("end is only valid inside a matrix index".into())),
-        ExprKind::IndexAll | ExprKind::IndexRange { .. } => Err(RuntimeError::InvalidArgument("slice expressions require a direct bidimensional matrix index".into())),
+        ExprKind::IndexAll | ExprKind::IndexRange { .. } => Err(RuntimeError::InvalidArgument("slice expressions require a direct matrix index".into())),
         ExprKind::Identifier(name) => match env.get(name) {
             Some(value) => Ok(value.clone()),
             None if name == "pause" => call(name, Vec::new(), output),
@@ -508,10 +556,12 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut ExecutionCon
                 return Err(RuntimeError::Unsupported("only named function calls are supported".into()));
             };
             // A matrix followed by parentheses is indexed with Sun's 1-based convention.
-            if let Some(Value::Matrix(matrix)) = env.get(name).cloned() {
+            if let Some(Value::Matrix(matrix)) = env.get(name) {
                 if arguments.len() == 1 {
                     if is_slice_index(&arguments[0]) {
-                        return Err(RuntimeError::Unsupported("linear slices are not supported yet".into()));
+                        let indices = eval_selection(&arguments[0], env, output, IndexAxis::Linear, matrix.shape())?;
+                        let force_column = matches!(arguments[0].kind, ExprKind::IndexAll);
+                        return Ok(Value::Matrix(matrix.select_linear(&indices, force_column)?));
                     }
                     let index = eval_index(&arguments[0], env, output, "linear", matrix.element_count())?;
                     return Ok(Value::Number(matrix.get_linear(index)?));
@@ -565,7 +615,7 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
 }
 
 fn matrix_map(matrix: &SunMatrix, f: impl Fn(f64) -> f64) -> Result<SunMatrix, MatrixError> {
-    SunMatrix::from_rows(matrix.to_rows().into_iter().map(|row| row.into_iter().map(&f).collect()).collect())
+    Ok(matrix.map(f))
 }
 
 fn valid_error_identifier(identifier: &str) -> bool {
@@ -645,12 +695,21 @@ fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Resu
         ("abs", Value::Number(n)) => Ok(Value::Number(n.abs())),
         ("exp", Value::Number(n)) => Ok(Value::Number(n.exp())),
         ("log", Value::Number(n)) => Ok(Value::Number(n.ln())),
-        ("sum", Value::Matrix(m)) => Ok(Value::Number(m.to_rows().iter().flatten().copied().sum())),
+        ("size", Value::Matrix(matrix)) => {
+            let (rows, cols) = matrix.shape();
+            Ok(Value::Matrix(SunMatrix::from_rows(vec![vec![rows as f64, cols as f64]])?))
+        }
+        ("size", Value::Number(_)) => Ok(Value::Matrix(SunMatrix::from_rows(vec![vec![1.0, 1.0]])?)),
+        ("numel", Value::Matrix(matrix)) => Ok(Value::Number(matrix.element_count() as f64)),
+        ("numel", Value::Number(_)) => Ok(Value::Number(1.0)),
+        ("isempty", Value::Matrix(matrix)) => Ok(Value::Number(matrix.is_empty() as u8 as f64)),
+        ("isempty", Value::Number(_)) => Ok(Value::Number(0.0)),
+        ("sum", Value::Matrix(m)) => Ok(Value::Number(if m.is_empty() { 0.0 } else { m.to_rows().iter().flatten().copied().sum() })),
         ("transpose", Value::Matrix(m)) => Ok(Value::Matrix(m.transpose()?)),
         ("det", Value::Matrix(m)) => Ok(Value::Number(m.determinant()?)),
         ("inv", Value::Matrix(m)) => Ok(Value::Matrix(m.inverse()?)),
         ("sum", Value::Number(n)) => Ok(Value::Number(n)),
-        (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum" | "transpose" | "det" | "inv" | "solve") =>
+        (unknown, _) if !matches!(unknown, "sqrt" | "sin" | "cos" | "tan" | "abs" | "exp" | "log" | "sum" | "transpose" | "det" | "inv" | "solve" | "size" | "numel" | "isempty") =>
             Err(RuntimeError::Unsupported(format!("unknown function '{unknown}'"))),
         (known, value) => Err(RuntimeError::Unsupported(format!("function '{known}' does not support {value}"))),
     }
@@ -659,6 +718,263 @@ fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_empty_matrix_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/matrizes_vazias.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Literal vazio:", "[]", "Forma do literal:", "[0, 0]",
+            "Sem linhas:", "[0, 3]", "Sem colunas:", "[2, 0]", "Selecao sem elementos.", "Quantidade de elementos:", "0",
+            "Soma vazia:", "0", "Iteracoes do for vazio:", "0", "Transposta sem linhas:", "[3, 0]",
+            "Destino apos escrita vazia:", "[1, 2, 3; 4, 5, 6]", "Sun:IndexOutOfBounds"]);
+    }
+
+    #[test]
+    fn empty_literal_is_displayed_and_can_be_queried() {
+        let module = sun_parser::parse("E = []; disp(E); disp(size(E)); disp(numel(E)); disp(isempty(E)); disp(size(7)); disp(numel(7)); disp(isempty(0)); if isempty(E); disp(9); end;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[]", "[0, 0]", "0", "1", "[1, 1]", "1", "0", "9"]);
+    }
+
+    #[test]
+    fn empty_slices_preserve_axis_and_linear_shapes() {
+        for (expression, shape) in [("E", "[0, 0]"), ("R", "[0, 3]"), ("C", "[2, 0]"),
+            ("transpose(R)", "[3, 0]"), ("transpose(C)", "[0, 2]"), ("R(:, end)", "[0, 1]"),
+            ("C(end, :)", "[1, 0]"), ("R(:)", "[0, 1]"), ("R(1:end)", "[1, 0]"),
+            ("E(:)", "[0, 1]"), ("E(1:end)", "[1, 0]")] {
+            let source = format!("A = [1, 2, 3; 4, 5, 6]; E = []; R = A(2:1, :); C = A(:, 2:1); disp(size({expression})); disp({expression});");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec![shape, "[]"], "unexpected result for {expression}");
+        }
+    }
+
+    #[test]
+    fn empty_arithmetic_preserves_shapes_and_compatible_broadcasting() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; R = A(2:1, :); C = A(:, 2:1); S = [2]; disp(size(R * 2)); disp(size(2 .* R)); disp(size(R / 2)); disp(size(R + S)); disp(size(S - R)); disp(size(C .* S)); disp(size(R + R)); disp(sum(R));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[0, 3]", "[0, 3]", "[0, 3]", "[0, 3]", "[0, 3]", "[2, 0]", "[0, 3]", "0"]);
+    }
+
+    #[test]
+    fn empty_products_and_linear_algebra_use_defined_shapes() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; R = A(2:1, :); C = A(:, 2:1); E = []; disp(C * R); disp(det(E)); disp(inv(E)); disp(size(solve(E, R))); disp(size(solve(A, C)));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[0, 0; 0, 0]", "1", "[]", "[0, 2]", "[2, 0]"]);
+    }
+
+    #[test]
+    fn empty_for_sources_execute_no_body_and_keep_existing_variable() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; value = 42; for value = []; disp(undefined); end; for value = A(2:1, :); disp(undefined); end; for value = A(:, 2:1); disp(undefined); end; disp(value); disp(7);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["42", "7"]);
+    }
+
+    #[test]
+    fn empty_selection_writes_do_not_mutate_or_grow_target() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(2:1, :) = 0; A(2:1, :) = []; A(2:1) = []; A(2:1) = [99]; A(:, 2:1) = A(:, 2:1); disp(A); E = []; E(:) = 1; E(:, :) = []; E(:, :) = [7]; disp(size(E));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2, 3; 4, 5, 6]", "[0, 0]"]);
+    }
+
+    #[test]
+    fn nonempty_selection_cannot_be_deleted_by_empty_rhs() {
+        for operation in ["A(:, 1) = [];", "A(1:end) = [];", "A(2:1, :) = [1, 2];"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch failure; disp(failure.identifier); end; disp(A);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:IncompatibleDimensions", "[1, 2; 3, 4]"]);
+        }
+    }
+
+    #[test]
+    fn empty_dimensions_still_enforce_nonempty_indices() {
+        for operation in ["E(1);", "E(1, 1);", "R(1, :);", "R(:, end + 1);", "C(:, 1);", "E(1) = 7;"] {
+            let source = format!("A = [1, 2; 3, 4]; E = []; R = A(2:1, :); C = A(:, 2:1); {operation}");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap_err().identifier(), "Sun:IndexOutOfBounds");
+        }
+        let module = sun_parser::parse("E = []; E(end);").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
+    }
+
+    #[test]
+    fn shape_queries_validate_argument_counts_and_numeric_types() {
+        for source in ["size();", "size([], 1);", "numel(1, 2);", "isempty();"] {
+            assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::Arity(_, _))));
+        }
+        for source in ["size(\"text\");", "isempty(\"\");", "numel(\"text\");"] {
+            assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::Unsupported(_))));
+        }
+    }
+
+    #[test]
+    fn runs_linear_slice_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/fatias_lineares.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Todos os elementos em coluna:", "[1; 4; 2; 5; 3; 6]",
+            "Do segundo ate end:", "[4, 2, 5, 3, 6]", "Ordem inversa:", "[6, 3, 5, 2, 4, 1]",
+            "Vetor coluna preservado:", "[20; 30]", "Preenchimento alternado:", "[0, 0, 0; 4, 5, 6]",
+            "Copia linear sobreposta:", "[0, 4, 5; 0, 0, 0]", "Substituicao por quantidade:", "[10, 50, 40; 30, 20, 60]",
+            "Sun:IncompatibleDimensions", "Apos falha de quantidade:", "[10, 50, 40; 30, 20, 60]"]);
+    }
+
+    #[test]
+    fn reads_linear_colon_and_range_slices() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; disp(A(:)); disp(A(2:end));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1; 4; 2; 5; 3; 6]", "[4, 2, 5, 3, 6]"]);
+    }
+
+    #[test]
+    fn linear_slices_preserve_vector_orientation_and_colon_forces_a_column() {
+        let module = sun_parser::parse("row = [1, 2, 3]; column = [4; 5; 6]; disp(row(:)); disp(row(2:end)); disp(column(2:end)); disp(row(1:1)); disp(row(1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1; 2; 3]", "[2, 3]", "[5; 6]", "[1]", "1"]);
+    }
+
+    #[test]
+    fn linear_slice_steps_follow_column_order_forward_and_backward() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; disp(A(end:-1:1)); disp(A(1:2:end)); disp(A(end:-2:1)); disp(A(1:7:end + 1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[6, 3, 5, 2, 4, 1]", "[1, 2, 3]", "[6, 5, 4]", "[1]"]);
+    }
+
+    #[test]
+    fn linear_slice_copies_are_independent_and_transposes_use_current_shape() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; selected = A(:); selected(1) = 99; disp(A(1)); T = transpose(A); disp(T(1:end)); A = [7, 8, 9]; disp(A(:));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "[1, 2, 3, 4, 5, 6]", "[7; 8; 9]"]);
+    }
+
+    #[test]
+    fn fills_linear_slices_with_scalars_without_changing_shape() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(:) = 0; A(2:2:end) = [9]; A(1:2:end) = 7; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[7, 7, 7; 9, 9, 9]"]);
+    }
+
+    #[test]
+    fn linear_slice_writes_compare_element_counts_and_flatten_rhs_by_columns() {
+        let module = sun_parser::parse("A = [0, 0, 0; 0, 0, 0]; A(:) = [10, 20; 30, 40; 50, 60]; disp(A); A(1:2:end) = [7; 8; 9]; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[10, 50, 40; 30, 20, 60]", "[7, 8, 9; 30, 20, 60]"]);
+    }
+
+    #[test]
+    fn overlapping_linear_slice_writes_use_rhs_snapshot() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(2:end) = A(1:end - 1); disp(A); A = [1, 2, 3; 4, 5, 6]; A(end:-1:1) = A; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 4, 5; 1, 2, 3]", "[6, 5, 4; 3, 2, 1]"]);
+    }
+
+    #[test]
+    fn linear_slice_bounds_resolve_nested_end_and_function_arguments() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; B = [1; 2]; disp(A(B(end):end - 1)); disp(A(1:B(end):end)); disp(A(1:sqrt(end + 3):end)); disp(A(B(end), :));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[4, 2, 5, 3]", "[1, 2, 3]", "[1, 5]", "[4, 5, 6]"]);
+    }
+
+    #[test]
+    fn linear_slice_write_rhs_resolves_its_own_end_context() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; B = [10, 20, 30, 40, 50]; A(2:end) = B(:); disp(A); try; A(:) = sqrt(end); catch failure; disp(failure.identifier); end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 20, 40; 10, 30, 50]", "Sun:InvalidArgument", "[1, 20, 40; 10, 30, 50]"]);
+    }
+
+    #[test]
+    fn linear_slice_errors_preserve_target_and_report_existing_identifiers() {
+        for (operation, identifier) in [
+            ("A(1:end + 1) = 0;", "Sun:IndexOutOfBounds"),
+            ("A(1:1000000000) = 0;", "Sun:IndexOutOfBounds"),
+            ("A(2:end) = [1, 2];", "Sun:IncompatibleDimensions"),
+            ("A(:) = [1, 2];", "Sun:IncompatibleDimensions"),
+            ("A(:) = \"text\";", "Sun:UnsupportedOperation"),
+            ("A(1:0:end) = 0;", "Sun:InvalidArgument"),
+            ("A(1:0.5:end) = 0;", "Sun:InvalidArgument"),
+            ("A(:) = undefined;", "Sun:UndefinedVariable"),
+        ] {
+            let source = format!("A = [1, 2, 3; 4, 5, 6]; try; {operation} catch failure; disp(failure.identifier); end; disp(A);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec![identifier, "[1, 2, 3; 4, 5, 6]"], "unexpected result for {operation}");
+        }
+    }
+
+    #[test]
+    fn linear_slice_context_is_restored_after_reads_and_errors() {
+        for operation in ["A(1:end);", "A(1:undefined);", "A(1:undefined) = 7;"] {
+            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch; end; try; disp(end); catch failure; disp(failure.identifier); end; disp(A(end));");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:InvalidArgument", "4"]);
+        }
+    }
+
+    #[test]
+    fn linear_slice_orientation_controls_for_iteration() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; total = 0; for value = A(2:end); total = total + value; end; disp(total); count = 0; for column = A(:); count = count + 1; disp(sum(column)); end; disp(count);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["20", "21", "1"]);
+    }
+
+    #[test]
+    fn runs_slice_assignment_example() {
+        let module = sun_parser::parse(include_str!("../../../examples/atribuicao_fatias.sun")).unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Coluna zerada:", "[1, 2, 0; 4, 5, 0; 7, 8, 0]",
+            "Linha substituida:", "[10, 20, 0; 4, 5, 0; 7, 8, 0]", "Bloco substituido:", "[10, 20, 0; 40, 50, 0; 70, 80, 0]",
+            "Copia sobreposta:", "[20, 0, 0; 50, 0, 0; 80, 0, 0]", "Linhas invertidas:", "[80, 0, 0; 50, 0, 0; 20, 0, 0]",
+            "Escalar matricial expandido:", "[80, 7, 7; 50, 7, 7; 20, 0, 0]", "Sun:IncompatibleDimensions",
+            "Apos falha de dimensoes:", "[80, 7, 7; 50, 7, 7; 20, 0, 0]"]);
+    }
+
+    #[test]
+    fn fills_a_selected_column_with_a_scalar() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(:, end) = 0; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 2, 0; 4, 5, 0]"]);
+    }
+
+    #[test]
+    fn fills_rows_columns_and_whole_matrix_with_scalar_values() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(end, :) = 9; A(:, 2:2) = 7; disp(A); A(:, :) = [0]; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 7, 3; 9, 7, 9]", "[0, 0, 0; 0, 0, 0]"]);
+    }
+
+    #[test]
+    fn assigns_exactly_shaped_matrix_values_to_slices() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(:, end) = [30; 60]; A(1, 1:2) = [10, 20]; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[10, 20, 30; 4, 5, 60]"]);
+    }
+
+    #[test]
+    fn slice_assignment_preserves_reversed_and_strided_target_order() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; A(end:-2:1, end:-2:1) = [100, 200; 300, 400]; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[11, 400, 13, 300; 21, 22, 23, 24; 31, 200, 33, 100]"]);
+    }
+
+    #[test]
+    fn overlapping_slice_assignments_read_rhs_before_writing() {
+        let module = sun_parser::parse("A = [1, 2, 3; 4, 5, 6]; A(:, 1:2) = A(:, 2:3); disp(A); A(end:-1:1, :) = A; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[2, 3, 3; 5, 6, 6]", "[5, 6, 6; 2, 3, 3]"]);
+    }
+
+    #[test]
+    fn slice_assignment_resolves_nested_indices_and_rhs_end_independently() {
+        let module = sun_parser::parse("A = [11, 12, 13, 14; 21, 22, 23, 24; 31, 32, 33, 34]; B = [1; 2]; C = [7, 8; 9, 10]; A(B(end):end, end - 1:end) = C(end:-1:1, :); disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[11, 12, 13, 14; 21, 22, 9, 10; 31, 32, 7, 8]"]);
+    }
+
+    #[test]
+    fn slice_assignment_failures_leave_target_unchanged() {
+        for (operation, identifier) in [
+            ("A(1:3, 1) = 0;", "Sun:IndexOutOfBounds"),
+            ("A(:, 1:4) = 0;", "Sun:IndexOutOfBounds"),
+            ("A(1:2, 4) = 0;", "Sun:IndexOutOfBounds"),
+            ("A(1:1, :) = [7, 8];", "Sun:IncompatibleDimensions"),
+            ("A(:, end) = [7, 8];", "Sun:IncompatibleDimensions"),
+            ("A(:, end) = [7; 8; 9];", "Sun:IncompatibleDimensions"),
+            ("A(:, end) = \"text\";", "Sun:UnsupportedOperation"),
+            ("A(:, end) = undefined;", "Sun:UndefinedVariable"),
+            ("A(1:0:end, :) = 0;", "Sun:InvalidArgument"),
+        ] {
+            let source = format!("A = [1, 2, 3; 4, 5, 6]; try; {operation} catch failure; disp(failure.identifier); end; disp(A);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec![identifier, "[1, 2, 3; 4, 5, 6]"], "unexpected result for {operation}");
+        }
+    }
+
+    #[test]
+    fn slice_assignment_does_not_leak_end_context_into_rhs_or_handlers() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; try; A(:, end) = sqrt(end); catch failure; disp(failure.identifier); end; try; disp(end); catch failure; disp(failure.identifier); end; disp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["Sun:InvalidArgument", "Sun:InvalidArgument", "[1, 2; 3, 4]"]);
+    }
+
+    #[test]
+    fn slice_assignment_requires_existing_matrix_target() {
+        let module = sun_parser::parse("missing(:, end) = 0;").unwrap();
+        assert!(matches!(execute(&module), Err(RuntimeError::UndefinedVariable(name)) if name == "missing"));
+        let module = sun_parser::parse("A = 7; A(:, end) = 0;").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("non-matrix"));
+    }
+
+    #[test]
+    fn slice_assignment_continues_with_following_statements_and_loop_iterations() {
+        let module = sun_parser::parse("A = [0, 0; 0, 0]; for column = 1:2; A(:, column) = column; disp(column); end; A(1:1, :) = 9\ndisp(A); return; A(:, :) = 0;").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["1", "2", "[9, 9; 1, 2]"]);
+    }
 
     #[test]
     fn runs_matrix_slice_example() {
@@ -726,19 +1042,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_slices_follow_the_current_nonempty_matrix_policy() {
+    fn empty_slices_return_empty_matrix_values() {
         for operation in ["A(2:1, :);", "A(1:-1:2, :);", "A(:, 2:1);"] {
-            let source = format!("A = [1, 2; 3, 4]; {operation}");
-            assert!(matches!(execute(&sun_parser::parse(&source).unwrap()), Err(RuntimeError::Matrix(MatrixError::Empty))));
+            let source = format!("A = [1, 2; 3, 4]; {operation} disp(7);");
+            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["7"]);
         }
     }
 
     #[test]
-    fn unsupported_slice_forms_fail_without_mutating_the_target() {
-        for operation in ["A(:, 1) = 9;", "A(1:end, :) = 9;", "A(:) = 9;", "A(:);", "A(1:end);"] {
-            let source = format!("A = [1, 2; 3, 4]; try; {operation} catch failure; disp(failure.identifier); end; disp(A);");
-            assert_eq!(execute(&sun_parser::parse(&source).unwrap()).unwrap(), vec!["Sun:UnsupportedOperation", "[1, 2; 3, 4]"]);
-        }
+    fn slice_expressions_require_a_direct_matrix_index_context() {
         for source in ["disp(:);", "sum(1:3);"] {
             assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::InvalidArgument(_))));
         }
@@ -1159,7 +1471,6 @@ mod tests {
             ("1 + \"text\";", "Sun:UnsupportedOperation"),
             ("sqrt();", "Sun:InvalidArgumentCount"),
             ("for index = 1:0:2; end", "Sun:InvalidForRange"),
-            ("[];", "Sun:EmptyMatrix"),
             ("[1; 2, 3];", "Sun:RaggedMatrixRows"),
             ("A = [1]; A(2, 1);", "Sun:IndexOutOfBounds"),
             ("[1, 2] + [1, 2, 3];", "Sun:IncompatibleDimensions"),
@@ -1565,7 +1876,7 @@ mod tests {
             assert!(matches!(execute(&sun_parser::parse(source).unwrap()), Err(RuntimeError::UndefinedVariable(_))));
         }
         let module = sun_parser::parse("for column = []; end").unwrap();
-        assert!(matches!(execute(&module), Err(RuntimeError::Matrix(MatrixError::Empty))));
+        assert!(execute(&module).unwrap().is_empty());
     }
 
     #[test]

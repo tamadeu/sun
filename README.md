@@ -177,7 +177,7 @@ cargo run -p sun -- run examples/for.sun
 ## For loops over matrix columns
 
 The interpreter also accepts `for variable = source`, where source evaluates
-to a number or a nonempty numeric matrix:
+to a number or a numeric matrix:
 
 ```matlab
 A = [1, 2, 3; 10, 20, 30];
@@ -204,8 +204,8 @@ Only the current column is materialized at each iteration.
 as range loops. The last body value of the loop variable remains available
 after the loop. Strings and void results are not iterable. Unlike range
 bounds, matrix elements and scalar sources may contain non-finite numbers.
-Empty matrices (`[]`) are still rejected by the numeric core; this form does
-not yet implement MATLAB's empty-array iteration. Native compilation is not
+Sources with zero elements, including `0xN` and `Nx0` matrices, execute no
+iterations and leave the loop variable unchanged. Native compilation is not
 supported.
 
 ```sh
@@ -372,9 +372,10 @@ Built-in error identifiers:
 | Unsupported operation | `Sun:UnsupportedOperation` |
 | Argument count | `Sun:InvalidArgumentCount` |
 | Invalid argument or exception field | `Sun:InvalidArgument` |
+| Unsupported or unsafe parallel-loop form | `Sun:InvalidParFor` |
 | Runtime host I/O failure | `Sun:IOError` |
 | Invalid range | `Sun:InvalidForRange` |
-| Empty matrix | `Sun:EmptyMatrix` |
+| Legacy nonempty-operation error | `Sun:EmptyMatrix` |
 | Ragged matrix rows | `Sun:RaggedMatrixRows` |
 | Matrix index out of bounds (linear or 2D) | `Sun:IndexOutOfBounds` |
 | Incompatible dimensions | `Sun:IncompatibleDimensions` |
@@ -501,7 +502,7 @@ context exists, such as `disp(end)` or `sqrt(end)` outside an index.
 
 The bidimensional form uses `A(row, column)` with a named matrix target.
 Single-index access and bidimensional slice reads are also available, as
-described below. Matrix growth, empty matrices, and native compilation of
+described below. Matrix growth and native compilation of
 index `end` remain unsupported.
 
 ```sh
@@ -538,7 +539,7 @@ context; its own matrix accesses establish the appropriate dimensions.
 Indices must be finite positive integers and must not exceed the element
 count. Out-of-range access raises `Sun:IndexOutOfBounds`. Writes require an
 existing matrix and a numeric scalar value. They preserve the matrix shape:
-`A(end + 1) = value` does not append an element. Linear slices, vector or
+`A(end + 1) = value` does not append an element. Vector or
 logical-array indices, deletion, matrix growth and native linear indexing are
 not implemented yet. Ordinary named function calls keep their existing meaning.
 
@@ -547,7 +548,7 @@ cargo run -p sun -- check examples/indices_lineares.sun
 cargo run -p sun -- run examples/indices_lineares.sun
 ```
 
-## Matrix slice reads
+## Matrix slices
 
 The interpreter supports bidimensional slice reads with complete axes and
 integer ranges:
@@ -577,17 +578,218 @@ single selected element. Scalar-only reads keep returning a number. A selected
 row has shape `1xN`; a selected column has shape `Nx1`. Results are independent
 copies: modifying a variable holding a slice does not modify the source.
 
-This stage supports reads only. Slice assignments, linear slices such as
-`A(:)` or `A(2:end)`, vector/logical indexing, and native slice compilation are
-not implemented. Ranges and `:` are direct matrix-index syntax, not general
-expression values. Empty selections still raise `Sun:EmptyMatrix`, because
-the numeric core currently requires nonempty matrices. Fractional range
+Bidimensional slice assignments are also supported, as described below.
+Linear slices such as `A(:)` and `A(2:end)` are also supported, as described
+below. Vector/logical indexing and native slice compilation are not implemented.
+Ranges and `:` are direct matrix-index syntax, not general
+expression values. Empty selections preserve their axis dimensions, as
+described below. Fractional range
 components are not accepted, even when a particular progression could yield
 only integer indices.
 
 ```sh
 cargo run -p sun -- check examples/fatias.sun
 cargo run -p sun -- run examples/fatias.sun
+```
+
+## Assigning matrix slices
+
+Bidimensional slice assignments accept numeric scalar fills or a matrix whose
+shape exactly matches the selected rows and columns:
+
+```matlab
+A = [1, 2, 3; 4, 5, 6; 7, 8, 9];
+A(:, end) = 0;
+A(1, 1:2) = [10, 20];
+A(2:end, 1:2) = [40, 50; 70, 80];
+disp(A);
+```
+
+Scalar numbers and `1x1` matrices fill every selected position. Other matrices
+must match both dimensions and orientation exactly: no implicit reshaping or
+row/column broadcasting is performed. Mismatches raise
+`Sun:IncompatibleDimensions`. Steps, reversed axes, nested indices, and `end`
+use the same selection rules as reads. Values map to positions in the order
+specified by the row and column selectors.
+
+The right-hand side is fully evaluated before writing, so overlapping
+assignments such as `A(:, 1:2) = A(:, 2:3)` and `A(end:-1:1, :) = A` use a
+snapshot of the source values. Target bounds and value shape are validated
+before the first write; validation failures do not partially modify the
+destination. This does not roll back earlier side effects of evaluating
+expressions or previous statements. The right-hand side resolves its own
+`end` contexts rather than inheriting the target's dimensions.
+
+Targets must already be matrices. Writes preserve shape, do not grow or delete
+elements, and follow the existing indexed-assignment output behavior. Empty
+selections accept scalar or empty values without modifying the target. Linear slice assignments use element counts rather
+than exact shape, as described below. Native slice compilation remains unsupported.
+
+```sh
+cargo run -p sun -- check examples/atribuicao_fatias.sun
+cargo run -p sun -- run examples/atribuicao_fatias.sun
+```
+
+## Linear slices
+
+Single-index slices follow the same 1-based column-major order as scalar
+linear indexing:
+
+```matlab
+A = [1, 2, 3; 4, 5, 6];
+disp(A(:));
+disp(A(2:end));
+disp(A(end:-1:1));
+A(1:2:end) = 0;
+```
+
+`A(:)` always returns a column containing all elements, here
+`[1; 4; 2; 5; 3; 6]`. A range such as `A(2:end)` returns a row when A is a
+matrix or row vector, here `[4, 2, 5, 3, 6]`; if A is a column vector, the
+result remains a column. Slices always produce independent matrix values,
+including when selecting one element. Scalar-only `A(index)` still returns a
+number. The `end` value is the current total element count, even inside bounds
+containing nested matrix reads or function calls.
+
+Linear slice assignments accept a scalar number, a `1x1` matrix, or a matrix
+with exactly as many elements as the selection. Unlike bidimensional writes,
+the RHS shape and orientation need not match: its values are read by columns.
+For example, assigning a `3x2` RHS to `A(:)` for a `2x3` target preserves A's
+`2x3` shape and copies the six RHS values in column-major order. Count mismatches
+raise `Sun:IncompatibleDimensions`.
+
+Writes validate all indices and the RHS count before mutating the destination.
+The RHS is evaluated first as an independent value, so overlapping operations
+such as `A(2:end) = A(1:end - 1)` are safe. Scalar fills, reversed ranges and
+integer steps are supported without growing or reshaping the target.
+
+The existing slice restrictions still apply: components must be finite
+integers, step must be nonzero, and selected indices must be positive and in bounds.
+Empty selections are valid matrix values. Vector/logical indices, deletion,
+growth, general colon expressions outside matrix arguments, and native linear
+slice compilation remain unsupported.
+
+```sh
+cargo run -p sun -- check examples/fatias_lineares.sun
+cargo run -p sun -- run examples/fatias_lineares.sun
+```
+
+## Empty matrices and shape queries
+
+The interpreter supports `[]` as a `0x0` numeric matrix. Empty selections retain
+their dimensions, and all empty matrices display as `[]`:
+
+```matlab
+A = [1, 2, 3; 4, 5, 6];
+no_rows = A(2:1, :);
+no_columns = A(:, 2:1);
+disp(size(no_rows));
+disp(size(no_columns));
+disp(isempty(no_rows));
+disp(numel(no_columns));
+```
+
+This prints `[0, 3]`, `[2, 0]`, `1`, and `0`. `size(value)` returns a two-element
+row matrix containing rows and columns. `numel(value)` returns the element
+count, and `isempty(value)` returns numeric `1` if there are no elements, else
+`0`. These initial forms accept exactly one numeric scalar or matrix argument;
+a scalar has size `[1, 1]` and one element. Dimension-specific size queries,
+multiple outputs, and string/object queries are not implemented.
+
+Transposition, scalar multiplication/division, compatible singleton-dimension
+broadcasting, and matrix products preserve empty shapes. In particular,
+`Mx0 * 0xN` produces an `MxN` matrix of zeros. `sum([])` is positive zero,
+`det([])` is `1`, and `inv([])` is `0x0`. Solving a compatible system with zero
+equations or zero RHS columns returns the correctly shaped empty result.
+Incompatible dimensions remain errors.
+
+Every zero-element source skips a `for` body, including `0xN` sources, and
+leaves an existing loop variable unchanged. Conditions still require finite
+scalar numbers: use `if isempty(value)` rather than a matrix condition.
+`end` on a zero-length axis evaluates to zero, so scalar indexing such as
+`empty(end)` is invalid. `empty(:)` is `0x1`; range slices preserve the existing
+row/column orientation rules. A nonempty index on either axis is still checked,
+even if the other axis is empty.
+
+Assignments selecting zero elements accept a scalar fill or any empty numeric
+matrix as a no-op. Non-scalar, nonempty RHS values are rejected. No deletion
+semantics are introduced: assigning `[]` to a nonempty selection fails with
+`Sun:IncompatibleDimensions` and leaves the target unchanged. No operation
+grows the matrix implicitly.
+
+`[]` and empty slices no longer raise `Sun:EmptyMatrix`; that identifier remains
+reserved for compatibility. Native empty matrices, native shape queries,
+matrix growth, and deletion are not supported yet.
+
+```sh
+cargo run -p sun -- check examples/matrizes_vazias.sun
+cargo run -p sun -- run examples/matrizes_vazias.sun
+```
+
+## Initial parallel loops
+
+The interpreter supports a conservative `parfor` subset using Rayon workers:
+
+```matlab
+input = [2, 3, 4, 5];
+output = [0, 0, 0, 0];
+parfor index = 1:4
+	squared = input(index) * input(index);
+	output(index) = squared;
+end
+disp(output);
+```
+
+This prints `[4, 9, 16, 25]`. Iteration order is unspecified. The range is
+evaluated once and must have finite integer bounds with step `1` or `-1`.
+Only the plain `parfor variable = start[:step]:stop ... end` form is supported.
+Rayon uses the available worker pool; `RAYON_NUM_THREADS` can configure its
+default size. A single available worker remains valid, but speedups are not
+guaranteed, especially for small loops.
+
+The initial body supports only local temporary assignments ending with `;`
+and numeric scalar writes to preallocated matrices. Accepted output patterns
+are `output(index)`, `output(index, literal)` and `output(literal, index)`,
+where `index` is exactly the iteration variable and `literal` is a positive
+integer literal. Each output matrix must use one consistent pattern throughout
+the loop. At least one output is required. Neither slices nor computed output
+indices are accepted yet.
+
+Output matrices are write-only inside the body. Read-only input matrices and
+scalars are broadcast snapshots, copied once per worker partition. Reading
+matrix elements does not clone the full input on every access. Temporaries
+must be assigned before use in each iteration, must not already exist outside
+the loop, and are not exported afterward. The outer iteration variable is
+also left unchanged. All syntactically referenced inputs must exist, even if
+an expression could short-circuit or the iteration range is empty.
+
+Numerical expressions, input matrix reads/slices, and the supported pure math,
+linear-algebra and shape-query functions are allowed. Reductions across
+iterations, reads of output matrices, modification of the loop variable,
+`disp`, `pause`, `error`, `rethrow`, nested control blocks, nested `parfor`,
+`break`, `continue`, and `return` are rejected. Compute shared reductions after
+the loop, for example `sum(output)`. This analysis is intentionally conservative
+and may reject independent programs outside this first subset.
+
+`sun check` validates structural independence and pure expressions. Execution
+performs that validation before any script statements, including for loops in
+unexecuted branches. Such static failures cannot be caught by a script's
+`try/catch`. Binding, range and target-bound checks happen before starting
+workers and can be caught normally. Constraint failures use `Sun:InvalidParFor`;
+ordinary matrix and expression errors retain their existing identifiers.
+
+Workers stage scalar writes without modifying the script environment. Results
+are applied only when every iteration succeeds; a worker error leaves all
+output matrices unchanged. Earlier script effects are not rolled back, and
+when several workers fail the selected error is not guaranteed to be the first
+one in sequential iteration order. Staging and input snapshots require extra
+memory. Native compilation, reduction variables, sliced-output blocks and
+MATLAB worker-limit syntax remain future work. Use script files rather than
+the current replaying REPL.
+
+```sh
+cargo run -p sun -- check examples/parfor.sun
+RAYON_NUM_THREADS=2 cargo run -p sun -- run examples/parfor.sun
 ```
 
 ## Build from source

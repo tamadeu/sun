@@ -6,6 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Number(f64), Ident(String), String(String),
+    ParFor,
     While, End, If, Elseif, Else, Break, Continue, For, Switch, Case, Otherwise, Return, Try, Catch,
     Plus, Minus, Star, DotStar, Slash, DotSlash, Caret,
     Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
@@ -58,6 +59,7 @@ impl Lexer<'_> {
                         "break" => TokenKind::Break,
                         "continue" => TokenKind::Continue,
                         "for" => TokenKind::For,
+                        "parfor" => TokenKind::ParFor,
                         "switch" => TokenKind::Switch,
                         "case" => TokenKind::Case,
                         "otherwise" => TokenKind::Otherwise,
@@ -150,6 +152,14 @@ impl Lexer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_parfor_without_matching_identifier_prefixes() {
+        let tokens = lex("parfor parfor_count Parfor").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ParFor);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("parfor_count".into()));
+        assert_eq!(tokens[2].kind, TokenKind::Ident("Parfor".into()));
+    }
 
     #[test]
     fn recognizes_try_catch_without_matching_identifier_prefixes() {

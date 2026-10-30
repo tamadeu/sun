@@ -1,0 +1,40 @@
+vazia = [];
+disp("Literal vazio:");
+disp(vazia);
+disp("Forma do literal:");
+disp(size(vazia));
+
+A = [1, 2, 3; 4, 5, 6];
+sem_linhas = A(2:1, :);
+sem_colunas = A(:, 2:1);
+disp("Sem linhas:");
+disp(size(sem_linhas));
+disp("Sem colunas:");
+disp(size(sem_colunas));
+
+if isempty(sem_linhas)
+    disp("Selecao sem elementos.");
+end
+disp("Quantidade de elementos:");
+disp(numel(sem_linhas));
+disp("Soma vazia:");
+disp(sum(vazia));
+
+contador = 0;
+for coluna = sem_linhas
+    contador = contador + 1;
+end
+disp("Iteracoes do for vazio:");
+disp(contador);
+
+disp("Transposta sem linhas:");
+disp(size(transpose(sem_linhas)));
+A(2:1, :) = 99;
+disp("Destino apos escrita vazia:");
+disp(A);
+
+try
+    vazia(1);
+catch erro
+    disp(erro.identifier);
+end

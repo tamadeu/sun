@@ -1,0 +1,32 @@
+A = [1, 2, 3; 4, 5, 6; 7, 8, 9];
+A(:, end) = 0;
+disp("Coluna zerada:");
+disp(A);
+
+A(1, 1:2) = [10, 20];
+disp("Linha substituida:");
+disp(A);
+
+A(2:end, 1:2) = [40, 50; 70, 80];
+disp("Bloco substituido:");
+disp(A);
+
+A(:, 1:2) = A(:, 2:3);
+disp("Copia sobreposta:");
+disp(A);
+
+A(end:-1:1, :) = A;
+disp("Linhas invertidas:");
+disp(A);
+
+A(1:2, 2:end) = [7];
+disp("Escalar matricial expandido:");
+disp(A);
+
+try
+    A(:, end) = [1, 2];
+catch erro
+    disp(erro.identifier);
+end
+disp("Apos falha de dimensoes:");
+disp(A);

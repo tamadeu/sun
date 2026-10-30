@@ -41,7 +41,7 @@ impl Generator {
                 }
             }
             ExprKind::Matrix(rows)=>{
-                if rows.is_empty()||rows[0].is_empty(){return Err(BackendError::Unsupported("empty matrices".into()));}
+                if rows.is_empty()||rows[0].is_empty(){return Err(BackendError::Unsupported("empty matrices are only available in the interpreter; use sun run".into()));}
                 let cols=rows[0].len();
                 if rows.iter().any(|r|r.len()!=cols){return Err(BackendError::Unsupported("matrix rows must have equal lengths".into()));}
                 let pointer=self.value();
@@ -161,6 +161,7 @@ impl Generator {
 pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
     let mut g=Generator::default();
     for stmt in &module.statements{match &stmt.kind{
+        StmtKind::ParFor{..}=>return Err(BackendError::Unsupported("parfor is only available in the interpreter; use sun run".into())),
         StmtKind::For{..}|StmtKind::ForEach{..}=>return Err(BackendError::Unsupported("for loops are only available in the interpreter; use sun run".into())),
         StmtKind::While{..}=>return Err(BackendError::Unsupported("while loops are only available in the interpreter; use sun run".into())),
         StmtKind::If{..}=>return Err(BackendError::Unsupported("if statements are only available in the interpreter; use sun run".into())),
@@ -192,8 +193,11 @@ pub fn compile_to_llvm_ir(module:&Module)->Result<String,BackendError>{
 #[cfg(test)]
 mod tests{
  use super::*;use sun_parser::parse;
- #[test]fn rejects_matrix_slices_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(:,1));","A=[1,2;3,4]; disp(A(1:end,:));"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("matrix slices"));assert!(error.contains("sun run"));}}
- #[test]fn rejects_linear_indexing_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(2));","A=[1,2;3,4]; disp(A(end));","A=[1,2;3,4]; A(end)=7;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("linear matrix indexing"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_parfor_with_interpreter_guidance(){let ast=parse("parfor index = 1:3; output(index) = index; end").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("parfor"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_empty_matrix_with_interpreter_guidance(){let ast=parse("A=[];").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("empty matrices"));assert!(error.contains("sun run"));}
+ #[test]fn rejects_shape_queries_in_native_backend(){for name in ["size","numel","isempty"]{let ast=parse(&format!("disp({name}([1]));")).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains(name));assert!(error.contains("native compilation"));}}
+ #[test]fn rejects_matrix_slices_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(:,1));","A=[1,2;3,4]; disp(A(1:end,:));","A=[1,2;3,4]; A(:,end)=0;","A=[1,2;3,4]; A(1:2,:)=A;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("matrix slices"));assert!(error.contains("sun run"));}}
+ #[test]fn rejects_linear_indexing_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(2));","A=[1,2;3,4]; disp(A(end));","A=[1,2;3,4]; A(end)=7;","A=[1,2;3,4]; disp(A(:));","A=[1,2;3,4]; disp(A(2:end));","A=[1,2;3,4]; A(:)=0;","A=[1,2;3,4]; A(1:end)=A;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("linear matrix indexing"));assert!(error.contains("sun run"));}}
  #[test]fn rejects_index_end_with_interpreter_guidance(){for source in ["A=[1,2;3,4]; disp(A(end,1));","A=[1,2;3,4]; A(1,end)=7;"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("end in matrix indices"));assert!(error.contains("sun run"));}}
  #[test]fn rejects_pause_with_interpreter_guidance(){for source in ["pause(0);","pause();","pause;","pause(\"query\");"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("pause"));assert!(error.contains("sun run"));}}
  #[test]fn compiles_variable_named_pause(){let ast=parse("pause=7; disp(pause);").unwrap();assert!(compile_to_llvm_ir(&ast).is_ok());}

@@ -1,0 +1,33 @@
+A = [1, 2, 3; 4, 5, 6];
+disp("Todos os elementos em coluna:");
+disp(A(:));
+
+disp("Do segundo ate end:");
+disp(A(2:end));
+
+disp("Ordem inversa:");
+disp(A(end:-1:1));
+
+coluna = [10; 20; 30];
+disp("Vetor coluna preservado:");
+disp(coluna(2:end));
+
+A(1:2:end) = 0;
+disp("Preenchimento alternado:");
+disp(A);
+
+A(2:end) = A(1:end - 1);
+disp("Copia linear sobreposta:");
+disp(A);
+
+A(:) = [10, 20; 30, 40; 50, 60];
+disp("Substituicao por quantidade:");
+disp(A);
+
+try
+    A(2:end) = [1, 2];
+catch erro
+    disp(erro.identifier);
+end
+disp("Apos falha de quantidade:");
+disp(A);
