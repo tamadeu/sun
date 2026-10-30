@@ -33,16 +33,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             asset: sun-linux-x86_64.tar.gz
-          - os: macos
-            arch: aarch64
-            target: aarch64-apple-darwin
-            runner: macos-14
-            asset: sun-macos-aarch64.tar.gz
-          - os: macos
-            arch: x86_64
-            target: x86_64-apple-darwin
-            runner: macos-13
-            asset: sun-macos-x86_64.tar.gz
           - os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc

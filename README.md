@@ -2,9 +2,11 @@
 
 Sun is an experimental scientific programming language inspired by MATLAB, written in Rust. It is designed around matrix-first computing, 1-based public indexing, and a planned LLVM native backend.
 
-Native compilation bundles a small C runtime ABI (`runtime/sun_runtime.c`) into each executable. The first ABI functions provide `sqrt`, `sin`, `cos`, `exp`, and `log`; matrix allocation and runtime indexing will move behind this boundary in a subsequent milestone.\n\n## Install a released binary
+Native compilation bundles a small C runtime ABI (`runtime/sun_runtime.c`) into each executable. The first ABI functions provide `sqrt`, `sin`, `cos`, `exp`, and `log`; matrix allocation and runtime indexing will move behind this boundary in a subsequent milestone.
 
-Linux (x86-64) and macOS (Apple Silicon or Intel):
+## Install a released binary
+
+Linux (x86-64):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/tamadeu/sun/main/install.sh | sh
@@ -16,7 +18,7 @@ Windows PowerShell (x86-64):
 irm https://raw.githubusercontent.com/tamadeu/sun/main/install.ps1 | iex
 ```
 
-The installer downloads the latest published release. If no release exists yet, build from source using the instructions below. Linux/macOS installs to `~/.local/bin` by default; set `SUN_INSTALL_DIR` to change it. Windows installs to `%USERPROFILE%\.sun\bin`.
+Prebuilt macOS releases are temporarily disabled. On macOS, build from source using the instructions below. The Linux installer installs to `~/.local/bin` by default; set `SUN_INSTALL_DIR` to change it. Windows installs to `%USERPROFILE%\\.sun\\bin`.
 
 ## Quick start
 
@@ -72,7 +74,7 @@ cargo install --path crates/sun-cli
 
 ## Releases
 
-Pushing a version tag such as `v0.1.0` runs tests, builds release binaries for Linux x86-64, macOS Apple Silicon/Intel, and Windows x86-64, then attaches archives to a GitHub Release. The install scripts download these release assets. Until the first release is published, use the source build instructions above.
+Pushing a version tag such as `v0.1.0` runs tests and builds release binaries for Linux x86-64 and Windows x86-64, then attaches archives to a GitHub Release. macOS builds are temporarily disabled. The install scripts download these release assets. Until the first release is published, use the source build instructions above.
 
 ## Current status
 
