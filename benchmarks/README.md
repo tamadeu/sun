@@ -25,3 +25,16 @@ For each size, the harness:
 The benchmark includes allocation time in both implementations. It is intended for comparative development measurements, not as a cross-machine performance guarantee. Run it in a quiet environment, use an optimized compiler build, and compare results on the same machine/compiler configuration. The CI job runs one repetition as a correctness and build smoke test; CI timings are not treated as performance evidence.
 
 No speedup is assumed or promised. Tile size and future kernel variants should be selected using measurements across representative hardware and matrix shapes.
+
+## Elementwise kernel benchmark
+
+The runtime's matrix addition, elementwise multiplication, scalar multiplication, and scalar division loops expose independent contiguous buffers and use an OpenMP SIMD loop directive. This is a compiler vectorization hint; it does not require linking the OpenMP runtime. Whether the compiler emits SIMD instructions and whether that improves performance depends on compiler flags and target hardware.
+
+Build and run the elementwise benchmark:
+
+```sh
+clang -O3 -std=c11 -Wall -Wextra benchmarks/elementwise_kernels.c -lm -o elementwise-bench
+./elementwise-bench 10
+```
+
+It checks correctness and compares a scalar reference loop with the runtime operation for tiny, irregular, tile-boundary, and larger matrix shapes. Timings include allocation/free on both paths and are intended as same-machine comparative measurements only. The reported ratio is scalar-loop time divided by runtime-kernel time; values above 1 indicate the runtime path was faster in that particular run. The CI invocation is a correctness/build smoke test, not a performance claim.
