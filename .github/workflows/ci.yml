@@ -43,7 +43,7 @@ jobs:
 
       - name: Compile and execute native math functions through the runtime ABI
         run: |
-          printf 'x = sqrt(81);\\ny = sin(0);\\nz = log(exp(2));\\ndisp(x);\\ndisp(y);\\ndisp(z);\\n' > /tmp/native-runtime.sun
+          printf 'x = sqrt(81);\ny = sin(0);\nz = log(exp(2));\ndisp(x);\ndisp(y);\ndisp(z);\n' > /tmp/native-runtime.sun
           cargo run -p sun -- compile /tmp/native-runtime.sun -o /tmp/native-runtime
-          test "$(/tmp/native-runtime)" = "$(printf '9\\n0\\n2')"
+          test "$(/tmp/native-runtime)" = "$(printf '9\n0\n2')"
           clang-18 -std=c11 -Wall -Wextra -Werror -c runtime/sun_runtime.c -o /tmp/sun_runtime.o
