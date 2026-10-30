@@ -73,10 +73,18 @@ impl Generator {
                 }
                 if let Some(NativeValue::Matrix{pointer,rows,cols})=self.variables.get(name).cloned(){
                     if arguments.len()!=2{return Err(BackendError::Unsupported("matrix indexing uses A(row, column)".into()));}
-                    let row=Self::literal_index(&arguments[0])?;let col=Self::literal_index(&arguments[1])?;
-                    if row==0||col==0||row>rows||col>cols{return Err(BackendError::IndexOutOfBounds{row,col,rows,cols});}
-                    let status=self.value();self.emit(format!("{status} = alloca i32, align 4"));
-                    let result=self.value();self.emit(format!("{result} = call double @sun_matrix_get(ptr {pointer}, i64 {row}, i64 {col}, ptr {status})"));
+                    // Keep literal coordinates compile-time checked; evaluate all other
+                    // index expressions at runtime and let the ABI validate their values.
+                    if let (Ok(row), Ok(col)) = (Self::literal_index(&arguments[0]), Self::literal_index(&arguments[1])) {
+                        if row==0||col==0||row>rows||col>cols{return Err(BackendError::IndexOutOfBounds{row,col,rows,cols});}
+                        let status=self.value();self.emit(format!("{status} = alloca i32, align 4"));
+                        let result=self.value();self.emit(format!("{result} = call double @sun_matrix_get(ptr {pointer}, i64 {row}, i64 {col}, ptr {status})"));
+                        return Ok(NativeValue::Scalar(result));
+                    }
+                    let row=self.scalar(&arguments[0])?;
+                    let col=self.scalar(&arguments[1])?;
+                    let result=self.value();
+                    self.emit(format!("{result} = call double @sun_matrix_get_indexed(ptr {pointer}, double {row}, double {col})"));
                     return Ok(NativeValue::Scalar(result));
                 }
                 Err(BackendError::Unsupported(format!("function '{name}' is not available in native compilation yet")))
@@ -155,6 +163,6 @@ mod tests{
  #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));assert!(ir.contains("call void @sun_matrix_free"));}
  #[test]fn compiles_matrix_multiplication(){let ast=parse("A=[1,2;3,4]; B=A*A; disp(B);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_multiply"));}
  #[test]fn reads_matrix_elements_with_one_based_indices(){let ast=parse("A=[1,2;3,4]; disp(A(2,1));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get"));}
- #[test]fn lowers_math_functions_through_the_runtime_abi(){let ast=parse("x=sqrt(81); y=sin(0);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_rt_sqrt"));assert!(ir.contains("call double @sun_rt_sin"));}
+ #[test]fn compiles_dynamic_matrix_indices(){let ast=parse("A=[1,2;3,4]; i=2; j=1+0; disp(A(i,j));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get_indexed"));}\n #[test]fn lowers_math_functions_through_the_runtime_abi(){let ast=parse("x=sqrt(81); y=sin(0);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_rt_sqrt"));assert!(ir.contains("call double @sun_rt_sin"));}
  #[test]fn rejects_zero_based_index(){let ast=parse("A=[1,2;3,4]; disp(A(0,1));").unwrap();assert!(compile_to_llvm_ir(&ast).unwrap_err().to_string().contains("1-based"));}
 }
