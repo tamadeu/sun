@@ -38,7 +38,7 @@ static double baseline_unary(const SunMatrix*a,double scalar,int divide,unsigned
 }
 static int run_case(size_t rows,size_t cols,unsigned reps) {
  SunMatrix*a=sun_matrix_create(rows,cols),*b=sun_matrix_create(rows,cols);
- if(!a||!b)return 0;fill(a);fill(b);
+ if(!a||!b)return 0;\n fill(a);fill(b);
  const size_t n=rows*cols;
  binary_kernel bk[]={sun_matrix_add,sun_matrix_element_multiply};
  const char*bn[]={"add","element_multiply"};
