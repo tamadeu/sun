@@ -1,0 +1,11 @@
+[package]
+name = "sun-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sun-lexer = { path = "../sun-lexer" }
+sun-ast = { path = "../sun-ast" }
+sun-source = { path = "../sun-source" }
+thiserror.workspace = true

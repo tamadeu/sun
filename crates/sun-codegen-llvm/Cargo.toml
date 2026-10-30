@@ -1,0 +1,9 @@
+[package]
+name = "sun-codegen-llvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+inkwell.workspace = true
+thiserror.workspace = true

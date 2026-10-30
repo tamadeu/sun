@@ -1,0 +1,4 @@
+% Sun matrix syntax preview
+A = [1, 2; 3, 4];
+B = A * A;
+C = A .* A;

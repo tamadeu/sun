@@ -1,0 +1,9 @@
+[package]
+name = "sun-lexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sun-source = { path = "../sun-source" }
+thiserror.workspace = true

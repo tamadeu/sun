@@ -1,0 +1,14 @@
+[package]
+name = "sun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sun"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+sun-lexer = { path = "../sun-lexer" }
+sun-parser = { path = "../sun-parser" }

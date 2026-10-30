@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-codegen-llvm", "crates/sun-cli"]
+default-members = ["crates/sun-source", "crates/sun-lexer", "crates/sun-ast", "crates/sun-parser", "crates/sun-numeric", "crates/sun-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/tamadeu/sun"
+
+[workspace.dependencies]
+thiserror = "2"
+ndarray = "0.16"
+approx = "0.5"
+clap = { version = "4", features = ["derive"] }
+inkwell = { version = "0.5", features = ["llvm18-0"] }
