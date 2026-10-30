@@ -102,7 +102,7 @@ impl<'a> MatrixView<'a> {
     }
 
     /// Returns a transposed view without allocating or copying elements.
-    pub fn transpose(&self) -> MatrixView<'a> { MatrixView { data: self.data.t() } }
+    pub fn transpose(self) -> MatrixView<'a> { MatrixView { data: self.data.reversed_axes() } }
 
     pub fn to_rows(&self) -> Vec<Vec<f64>> {
         self.data.rows().into_iter().map(|row| row.to_vec()).collect()
