@@ -71,7 +71,7 @@ impl Generator {
         }
     }
     fn literal_index(expr:&Expr)->Result<usize,BackendError>{
-        match expr.kind{ExprKind::Number(n) if n.is_finite()&&n.fract()==0.0&&n>=0.0=>Ok(n as usize),
+        match &expr.kind{ExprKind::Number(n) if n.is_finite()&&n.fract()==0.0&&*n>=0.0=>Ok(*n as usize),
             _=>Err(BackendError::Unsupported("native matrix indices must currently be non-negative integer literals".into()))}
     }
     fn binary(&mut self,a:NativeValue,op:BinaryOp,b:NativeValue)->Result<NativeValue,BackendError>{
