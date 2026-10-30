@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn evaluates_linear_algebra_functions() {
-        let module = sun_parser::parse("A = [4, 7; 2, 6];\nT = transpose(A);\nd = det(A);\nI = inv(A);\nX = solve(A, [1; 0]);").unwrap();
+        let module = sun_parser::parse("A = [4, 7; 2, 6]\nT = transpose(A)\nd = det(A)\nI = inv(A)\nX = solve(A, [1; 0])").unwrap();
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "T = [4, 2; 7, 6]");
         assert_eq!(result[2], "d = 10");
