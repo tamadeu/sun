@@ -105,7 +105,7 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
                 return Err(RuntimeError::Unsupported("only named function calls are supported".into()));
             };
             // A matrix followed by parentheses is indexed with Sun's 1-based convention.
-            if let Some(Value::Matrix(matrix)) = env.get(name) {
+            if let Some(Value::Matrix(matrix)) = env.get(name).cloned() {
                 if arguments.len() != 2 {
                     return Err(RuntimeError::Arity(name.clone(), "two indices: A(row, column)".into()));
                 }
