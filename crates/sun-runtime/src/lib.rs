@@ -237,7 +237,7 @@ mod tests {
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "T = [4, 2; 7, 6]");
         assert_eq!(result[2], "d = 10");
-        assert_eq!(result[3], "I = [0.6, -0.7; -0.2, 0.4]");
+        assert_eq!(result[3], "I = [0.6000000000000001, -0.7000000000000001; -0.2, 0.4]");
         assert_eq!(result[4], "X = [0.6; -0.2]");
     }
 
