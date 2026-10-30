@@ -8,7 +8,7 @@ The CLI can currently execute the supported subset through the built-in interpre
 
 source -> lexer -> parser -> semantic analysis -> Sun IR -> LLVM IR -> native executable/JIT
 
-The AST and Sun IR should remain independent from Inkwell. The numeric runtime owns matrix semantics; generated code should call stable runtime functions for matrix operations rather than embedding matrix storage details in LLVM IR.
+The AST and Sun IR should remain independent from Inkwell. The initial native backend currently lowers fixed-shape dense matrices directly to stack-allocated contiguous `double` buffers and unrolls matrix operations at compile time. This is an intentionally simple first implementation; a later stable runtime ABI should own dynamic allocation, bounds checks, and optimized matrix kernels.
 
 ## Initial decisions
 
@@ -16,7 +16,7 @@ The AST and Sun IR should remain independent from Inkwell. The numeric runtime o
 - Dense f64 matrices for the first release.
 - Public matrix indexing is 1-based.
 - LLVM is the intended native backend; the scaffold targets LLVM 18 through Inkwell.
-- The interpreter currently supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, and basic math functions.
+- The interpreter supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, 1-based matrix reads via `A(row, column)`, and basic math functions.\n- The initial LLVM backend supports scalar arithmetic and fixed-shape dense matrix literals/operations, matrix display, and compile-time literal 1-based matrix reads.
 - A trailing semicolon suppresses the implicit result; `disp(...)` still writes output.
 - MATLAB-style comments begin with %.
 
@@ -39,4 +39,4 @@ The AST and Sun IR should remain independent from Inkwell. The numeric runtime o
 
 ## LLVM prerequisites
 
-The backend crate is configured for LLVM 18 through Inkwell. Install LLVM 18 development files and ensure llvm-config is on PATH before building that crate. Default workspace members temporarily exclude the backend, so the interpreter and CLI do not require LLVM.
+The CLI invokes Clang 18+ to compile generated LLVM IR. Install Clang/LLVM and ensure `clang` is on PATH (or set `SUN_CLANG`). The Rust backend emits textual LLVM IR, so building the workspace does not require linking LLVM libraries.
