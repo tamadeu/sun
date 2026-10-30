@@ -8,7 +8,7 @@ void sun_runtime_cleanup(void);
 
 static void sun_runtime_fail(const char *message) {
  sun_runtime_cleanup();
- fprintf(stderr, "Sun runtime error: %s\\n", message);
+ fprintf(stderr, "Sun runtime error: %s\n", message);
  exit(EXIT_FAILURE);
 }
 void sun_runtime_cleanup(void) {
@@ -25,7 +25,7 @@ void sun_runtime_check_matrix(SunMatrix *matrix) {
 enum { SUN_MATRIX_OK=0, SUN_MATRIX_ERR_NULL=1, SUN_MATRIX_ERR_BOUNDS=2 };
 double sun_rt_sqrt(double x){return sqrt(x);} double sun_rt_sin(double x){return sin(x);}
 double sun_rt_cos(double x){return cos(x);} double sun_rt_exp(double x){return exp(x);}
-double sun_rt_log(double x){return log(x);} void sun_rt_print_f64(double x){printf("%g\\n",x);}
+double sun_rt_log(double x){return log(x);} void sun_rt_print_f64(double x){printf("%g\n",x);}
 SunMatrix *sun_matrix_create(size_t r,size_t c){
  if(!r||!c||r>SIZE_MAX/c||r*c>SIZE_MAX/sizeof(double))return NULL;
  SunMatrix*m=malloc(sizeof(*m));if(!m)return NULL;m->data=calloc(r*c,sizeof(double));
@@ -108,5 +108,5 @@ SunMatrix *sun_matrix_divide_scalar(const SunMatrix*a,double x){
 void sun_matrix_print(const SunMatrix*m){
  if(!m){puts("<null matrix>");return;}for(size_t r=0;r<m->rows;r++){
  for(size_t c=0;c<m->cols;c++)printf("%g%s",m->data[r*m->cols+c],c+1==m->cols?"":" ");
- putchar('\\n');}
+ putchar('\n');}
 }
