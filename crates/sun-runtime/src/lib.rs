@@ -149,15 +149,27 @@ pub fn validate_parallel_blocks(module: &Module) -> Result<(), RuntimeError> {
     parallel::validate_module(module)
 }
 
+pub struct ExecutionReport {
+    pub variables: HashMap<String, Value>,
+    pub result: Result<(), RuntimeError>,
+}
+
 pub fn execute_with_host(module: &Module, host: &mut dyn RuntimeHost) -> Result<(), RuntimeError> {
-    validate_parallel_blocks(module)?;
+    execute_with_report(module, host).result
+}
+
+pub fn execute_with_report(module: &Module, host: &mut dyn RuntimeHost) -> ExecutionReport {
     let mut env = HashMap::<String, Value>::new();
-    let mut context = ExecutionContext { host, pause_enabled: true, index_end: None };
-    match execute_statements(&module.statements, &mut env, &mut context)? {
-        ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
-        ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
-        ExecutionFlow::Continue => Err(RuntimeError::Unsupported("continue is only valid inside a loop".into())),
-    }
+    let result = (|| {
+        validate_parallel_blocks(module)?;
+        let mut context = ExecutionContext { host, pause_enabled: true, index_end: None };
+        match execute_statements(&module.statements, &mut env, &mut context)? {
+            ExecutionFlow::Normal | ExecutionFlow::Return => Ok(()),
+            ExecutionFlow::Break => Err(RuntimeError::Unsupported("break is only valid inside a loop".into())),
+            ExecutionFlow::Continue => Err(RuntimeError::Unsupported("continue is only valid inside a loop".into())),
+        }
+    })();
+    ExecutionReport { variables: env, result }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +730,17 @@ fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_report_preserves_workspace_after_runtime_failure() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4]; total = sum(A); error(\"stop\"); late = 99;").unwrap();
+        let mut host = CollectingHost { lines: Vec::new() };
+        let report = execute_with_report(&module, &mut host);
+        assert!(report.result.is_err());
+        assert_eq!(report.variables.get("total"), Some(&Value::Number(10.0)));
+        assert!(matches!(report.variables.get("A"), Some(Value::Matrix(_))));
+        assert!(!report.variables.contains_key("late"));
+    }
 
     #[test]
     fn runs_empty_matrix_example() {

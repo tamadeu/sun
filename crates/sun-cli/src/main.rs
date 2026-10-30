@@ -1,3 +1,5 @@
+mod studio;
+
 use clap::{Parser as ClapParser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -87,6 +89,8 @@ enum Command {
     Run { file: PathBuf },
     /// Validate the syntax of a .sun source file.
     Check { file: PathBuf },
+    /// Execute or check source using the Sun Studio JSON event protocol.
+    Studio { file: PathBuf, #[arg(long)] check: bool },
     /// Print the token stream for a source file.
     Lex { file: PathBuf },
     /// Create a starter Sun source file.
@@ -170,6 +174,9 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Some(Command::Studio { file, check }) => {
+            if !studio::run_file(&file, check)? { std::process::exit(1); }
+        }
         Some(Command::Run { file }) => {
             let source = fs::read_to_string(&file)?;
             let module = parse(&source)?;
