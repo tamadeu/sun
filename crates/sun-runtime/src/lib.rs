@@ -209,20 +209,20 @@ mod tests {
 
     #[test]
     fn evaluates_matrix_indices_from_variables_and_expressions() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ni = 1 + 1;\\nj = i - 1;\\ndisp(A(i, j));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 1 + 1;\nj = i - 1;\ndisp(A(i, j));").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["3"]);
     }
 
     #[test]
     fn rejects_fractional_dynamic_matrix_indices() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ni = 1.5;\\ndisp(A(i, 1));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 1.5;\ndisp(A(i, 1));").unwrap();
         assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
     }
 
     #[test]
     fn rejects_zero_based_matrix_indices() {
         let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(0, 1));").unwrap();
-        assert!(execute(&module).unwrap_err().to_string().contains("out of bounds"));
+        assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
     }
 
     #[test]
