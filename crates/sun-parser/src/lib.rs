@@ -32,6 +32,30 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek().span.start;
+        if matches!(&self.peek().kind, TokenKind::Ident(_)) && matches!(&self.peek_n(1).kind, TokenKind::LeftParen) {
+            let saved = self.current;
+            let name = match self.advance().kind.clone() { TokenKind::Ident(name) => name, _ => unreachable!() };
+            self.advance();
+            let candidate = (|| -> Result<Option<Stmt>, ParseError> {
+                let row = self.expression(0)?;
+                if !matches!(self.peek().kind, TokenKind::Comma) { return Ok(None); }
+                self.advance();
+                let col = self.expression(0)?;
+                self.expect(|kind| matches!(kind, TokenKind::RightParen), ")")?;
+                if !matches!(self.peek().kind, TokenKind::Equal) { return Ok(None); }
+                self.advance();
+                let value = self.expression(0)?;
+                let end = value.span.end;
+                let suppress_output = matches!(self.peek().kind, TokenKind::Semicolon);
+                if suppress_output { self.advance(); }
+                Ok(Some(Stmt { kind: StmtKind::IndexAssign { name, row, col, value }, span: Span::new(start, end), suppress_output }))
+            })();
+            match candidate {
+                Ok(Some(stmt)) => return Ok(stmt),
+                Ok(None) => self.current = saved,
+                Err(error) => { self.current = saved; if !matches!(error, ParseError::UnexpectedToken { .. }) { return Err(error); } }
+            }
+        }
         if let (TokenKind::Ident(name), TokenKind::Equal) = (&self.peek().kind, &self.peek_n(1).kind) {
             let name = name.clone();
             self.advance();
@@ -176,6 +200,22 @@ mod tests {
         assert!(module.statements[0].suppress_output);
         let ExprKind::Binary { op: BinaryOp::Add, right, .. } = &value.kind else { panic!("expected addition at root") };
         assert!(matches!(&right.kind, ExprKind::Binary { op: BinaryOp::Multiply, .. }));
+    }
+
+    #[test]
+    fn parses_indexed_matrix_assignment() {
+        let module = parse("A(2, 3) = 10;").unwrap();
+        let StmtKind::IndexAssign { name, row, col, value } = &module.statements[0].kind else { panic!("expected indexed assignment") };
+        assert_eq!(name, "A");
+        assert!(matches!(&row.kind, ExprKind::Number(n) if *n == 2.0));
+        assert!(matches!(&col.kind, ExprKind::Number(n) if *n == 3.0));
+        assert!(matches!(&value.kind, ExprKind::Number(n) if *n == 10.0));
+    }
+
+    #[test]
+    fn keeps_function_calls_as_expression_statements() {
+        let module = parse("disp(A(1, 2));").unwrap();
+        assert!(matches!(&module.statements[0].kind, StmtKind::Expr(_)));
     }
 
     #[test]

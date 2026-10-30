@@ -58,6 +58,19 @@ pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
                 env.insert(name.clone(), result.clone());
                 if !statement.suppress_output { output.push(format!("{name} = {result}")); }
             }
+            StmtKind::IndexAssign { name, row, col, value } => {
+                let row = eval_index(row, &mut env, &mut output, "row")?;
+                let col = eval_index(col, &mut env, &mut output, "column")?;
+                let value = match eval(value, &mut env, &mut output)? {
+                    Value::Number(number) => number,
+                    other => return Err(RuntimeError::Unsupported(format!("matrix assignment value must be a number, got {other}"))),
+                };
+                match env.get_mut(name) {
+                    Some(Value::Matrix(matrix)) => matrix.set(row, col, value)?,
+                    Some(other) => return Err(RuntimeError::Unsupported(format!("cannot index-assign into non-matrix variable '{name}' ({other})"))),
+                    None => return Err(RuntimeError::UndefinedVariable(name.clone())),
+                }
+            }
             StmtKind::Expr(expr) => {
                 let result = eval(expr, &mut env, &mut output)?;
                 if !statement.suppress_output && result != Value::Void { output.push(result.to_string()); }
@@ -65,6 +78,13 @@ pub fn execute(module: &Module) -> Result<Vec<String>, RuntimeError> {
         }
     }
     Ok(output)
+}
+
+fn eval_index(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>, axis: &str) -> Result<usize, RuntimeError> {
+    match eval(expr, env, output)? {
+        Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 && n <= usize::MAX as f64 => Ok(n as usize),
+        other => Err(RuntimeError::Unsupported(format!("matrix {axis} index must be a positive integer, got {other}"))),
+    }
 }
 
 fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>) -> Result<Value, RuntimeError> {
@@ -114,7 +134,7 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
                     other => return Err(RuntimeError::Unsupported(format!("matrix row index must be a positive integer, got {other}"))),
                 };
                 let col = match eval(&arguments[1], env, output)? {
-                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
+                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 => n as usize,
                     other => return Err(RuntimeError::Unsupported(format!("matrix column index must be a positive integer, got {other}"))),
                 };
                 return Ok(Value::Number(matrix.get(row, col)?));
@@ -211,6 +231,18 @@ mod tests {
     fn evaluates_matrix_indices_from_variables_and_expressions() {
         let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 1 + 1;\nj = i - 1;\ndisp(A(i, j));").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn assigns_matrix_elements_with_literal_and_dynamic_indices() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 2;\nj = 1;\nA(i, j) = 99;\nA(1, 2) = 42;\ndisp(A);").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["[1, 42; 99, 4]"]);
+    }
+
+    #[test]
+    fn rejects_matrix_assignment_out_of_bounds() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\nA(3, 1) = 9;").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("out of bounds"));
     }
 
     #[test]
