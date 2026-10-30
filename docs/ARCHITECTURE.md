@@ -4,19 +4,22 @@
 
 source -> lexer -> parser -> AST -> interpreter/runtime
 
-The CLI can currently execute the supported subset through the built-in interpreter. Native execution is planned as:
+Native execution currently follows:
 
-source -> lexer -> parser -> semantic analysis -> Sun IR -> LLVM IR -> native executable/JIT
+source -> lexer -> parser -> AST -> LLVM IR -> native executable
 
-The AST and Sun IR should remain independent from Inkwell. The numeric runtime owns matrix semantics; generated code should call stable runtime functions for matrix operations rather than embedding matrix storage details in LLVM IR.
+Semantic analysis and a stable Sun IR remain planned layers between the AST and LLVM.
+
+The initial native backend lowers fixed-shape dense matrices directly to stack-allocated contiguous `double` buffers and unrolls matrix operations at compile time. This is intentionally simple. A later stable runtime ABI should own dynamic allocation, bounds checks, and optimized matrix kernels.
 
 ## Initial decisions
 
 - Rust workspace with independently testable crates.
 - Dense f64 matrices for the first release.
 - Public matrix indexing is 1-based.
-- LLVM is the intended native backend; the scaffold targets LLVM 18 through Inkwell.
-- The interpreter currently supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, and basic math functions.
+- LLVM is the native backend; the CLI invokes Clang 18+ to compile generated LLVM IR.
+- The interpreter supports numeric expressions, variables, matrix literals, matrix addition/multiplication, element-wise multiplication, scalar multiplication/division, 1-based matrix reads via `A(row, column)`, and basic math functions.
+- The initial LLVM backend supports scalar arithmetic and fixed-shape dense matrix literals/operations, matrix display, and compile-time literal 1-based matrix reads.
 - A trailing semicolon suppresses the implicit result; `disp(...)` still writes output.
 - MATLAB-style comments begin with %.
 
@@ -26,6 +29,7 @@ The AST and Sun IR should remain independent from Inkwell. The numeric runtime o
     B = A * A;
     C = A .* A;
     disp(B);
+    disp(A(2, 1));
 
 ## Milestones
 
@@ -33,10 +37,10 @@ The AST and Sun IR should remain independent from Inkwell. The numeric runtime o
 2. Interpreter execution for scalar expressions and matrix operations.
 3. Packaging, installation scripts, and cross-platform release automation.
 4. Semantic analysis and a stable Sun IR.
-5. LLVM scalar expressions, native executable generation, and JIT path.
-6. Persistent REPL state, broader standard library, and diagnostics.
-7. Functions, control flow, indexing, and plotting API.
+5. LLVM scalar expressions and native executable generation.
+6. LLVM fixed-shape matrix code generation, matrix operations, display, and 1-based literal indexing.
+7. Matrix element assignment, dynamic indexing, runtime ABI, optimized kernels, functions, control flow, JIT, and plotting.
 
 ## LLVM prerequisites
 
-The backend crate is configured for LLVM 18 through Inkwell. Install LLVM 18 development files and ensure llvm-config is on PATH before building that crate. Default workspace members temporarily exclude the backend, so the interpreter and CLI do not require LLVM.
+Install Clang/LLVM 18+ and ensure `clang` is on PATH, or set `SUN_CLANG` to the compiler executable. The Rust backend emits textual LLVM IR, so building the workspace does not require linking LLVM libraries.

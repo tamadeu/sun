@@ -104,6 +104,21 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
             let ExprKind::Identifier(name) = &callee.kind else {
                 return Err(RuntimeError::Unsupported("only named function calls are supported".into()));
             };
+            // A matrix followed by parentheses is indexed with Sun's 1-based convention.
+            if let Some(Value::Matrix(matrix)) = env.get(name).cloned() {
+                if arguments.len() != 2 {
+                    return Err(RuntimeError::Arity(name.clone(), "two indices: A(row, column)".into()));
+                }
+                let row = match eval(&arguments[0], env, output)? {
+                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
+                    other => return Err(RuntimeError::Unsupported(format!("matrix row index must be a non-negative integer, got {other}"))),
+                };
+                let col = match eval(&arguments[1], env, output)? {
+                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
+                    other => return Err(RuntimeError::Unsupported(format!("matrix column index must be a non-negative integer, got {other}"))),
+                };
+                return Ok(Value::Number(matrix.get(row, col)?));
+            }
             let mut args = Vec::with_capacity(arguments.len());
             for arg in arguments { args.push(eval(arg, env, output)?); }
             call(name, args, output)
@@ -184,6 +199,18 @@ mod tests {
         let result = execute(&module).unwrap();
         assert_eq!(result[1], "B = [7, 10; 15, 22]");
         assert_eq!(result[2], "C = [1, 4; 9, 16]");
+    }
+
+    #[test]
+    fn indexes_matrices_using_one_based_coordinates() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(2, 1));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn rejects_zero_based_matrix_indices() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(0, 1));").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("out of bounds"));
     }
 
     #[test]

@@ -17,14 +17,26 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test language frontend, runtime, and LLVM backend
+      - name: Test language frontend, runtime, numeric crate, and LLVM backend
         run: cargo test
-      - name: Check and run the matrix example
+      - name: Check and run the matrix example in the interpreter
         run: |
           cargo run -p sun -- check examples/matrices.sun
           cargo run -p sun -- run examples/matrices.sun
-      - name: Compile and execute a native Sun program
+      - name: Compile and execute a native scalar program
         run: |
-          printf 'x = 2 + 3 * 4;\ndisp(x);\n' > /tmp/native-smoke.sun
-          cargo run -p sun -- compile /tmp/native-smoke.sun -o /tmp/native-smoke
-          test "$(/tmp/native-smoke)" = "14"
+          printf 'x = 2 + 3 * 4;\ndisp(x);\n' > /tmp/native-scalar.sun
+          cargo run -p sun -- compile /tmp/native-scalar.sun -o /tmp/native-scalar
+          test "$(/tmp/native-scalar)" = "14"
+      - name: Compile and execute native matrix operations and indexing
+        run: |
+          cat > /tmp/native-matrices.sun <<'SUN'
+          A = [1, 2; 3, 4];
+          B = A * A;
+          C = A .* A;
+          disp(B);
+          disp(C);
+          disp(A(2, 1));
+          SUN
+          cargo run -p sun -- compile /tmp/native-matrices.sun -o /tmp/native-matrices
+          test "$(/tmp/native-matrices)" = "$(printf '7 10 \n15 22 \n1 4 \n9 16 \n3')"
