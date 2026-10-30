@@ -62,3 +62,8 @@ jobs:
         run: |
           clang-18 -std=c11 -Wall -Wextra tests/matrix_runtime_abi.c runtime/sun_runtime.c -lm -o /tmp/sun-matrix-runtime-test
           test "$(/tmp/sun-matrix-runtime-test)" = "matrix runtime ABI OK"
+
+      - name: Build and run matrix kernel correctness benchmark
+        run: |
+          clang-18 -O3 -std=c11 -Wall -Wextra benchmarks/matrix_multiply.c -lm -o /tmp/sun-matrix-bench
+          /tmp/sun-matrix-bench 1

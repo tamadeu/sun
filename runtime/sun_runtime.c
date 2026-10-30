@@ -8,7 +8,7 @@ void sun_runtime_cleanup(void);
 
 static void sun_runtime_fail(const char *message) {
  sun_runtime_cleanup();
- fprintf(stderr, "Sun runtime error: %s\\n", message);
+ fprintf(stderr, "Sun runtime error: %s\n", message);
  exit(EXIT_FAILURE);
 }
 void sun_runtime_cleanup(void) {
@@ -69,12 +69,29 @@ SunMatrix *sun_matrix_element_multiply(const SunMatrix*a,const SunMatrix*b){
  SunMatrix*o=sun_matrix_create(a->rows,a->cols);if(!o)return NULL;
  for(size_t i=0;i<a->rows*a->cols;i++)o->data[i]=a->data[i]*b->data[i];return o;
 }
+
+/* Cache-blocked row-major matrix multiplication. The inner j loop walks
+ * contiguous rows of B and C; k remains ascending for each output element. */
+#define SUN_MATRIX_MATMUL_BLOCK 32
 SunMatrix *sun_matrix_multiply(const SunMatrix*a,const SunMatrix*b){
- if(!a||!b||a->cols!=b->rows)return NULL;SunMatrix*o=sun_matrix_create(a->rows,b->cols);if(!o)return NULL;
- for(size_t i=0;i<a->rows;i++) {
-  for(size_t j=0;j<b->cols;j++) {
-   for(size_t k=0;k<a->cols;k++) {
-    o->data[i*o->cols+j]+=a->data[i*a->cols+k]*b->data[k*b->cols+j];
+ if(!a||!b||a->cols!=b->rows)return NULL;
+ SunMatrix*o=sun_matrix_create(a->rows,b->cols);if(!o)return NULL;
+ const size_t block=SUN_MATRIX_MATMUL_BLOCK;
+ for(size_t ii=0;ii<a->rows;ii+=block){
+  const size_t i_end=ii+((a->rows-ii)<block?(a->rows-ii):block);
+  for(size_t kk=0;kk<a->cols;kk+=block){
+   const size_t k_end=kk+((a->cols-kk)<block?(a->cols-kk):block);
+   for(size_t jj=0;jj<b->cols;jj+=block){
+    const size_t j_end=jj+((b->cols-jj)<block?(b->cols-jj):block);
+    for(size_t i=ii;i<i_end;i++){
+     double *restrict c_row=o->data+i*o->cols;
+     const double *a_row=a->data+i*a->cols;
+     for(size_t k=kk;k<k_end;k++){
+      const double aik=a_row[k];
+      const double *b_row=b->data+k*b->cols;
+      for(size_t j=jj;j<j_end;j++)c_row[j]+=aik*b_row[j];
+     }
+    }
    }
   }
  }
