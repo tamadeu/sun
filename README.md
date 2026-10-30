@@ -823,6 +823,29 @@ Pushing a version tag such as `v0.1.0` runs tests and builds release binaries fo
 
 This is an early bootstrap, not yet a full MATLAB replacement. The lexer, parser, matrix primitives and assignment, interpreter, user-defined functions, persistent REPL, numeric CSV, initial 2D/3D plotting in Studio, scalar LLVM code generation, and initial native matrix code generation are implemented. Semantic analysis, a stable intermediate representation, dynamic native indexing, and richer graphics remain future milestones.
 
+### Restoring Studio Tabs
+
+Studio can reopen editable tabs and files in their previous order, with the
+selected folder, active tab and cursor positions. Open **Settings** using the
+gear icon or Ctrl/Cmd+comma and toggle **Restore tabs and files on startup**.
+The default is enabled; disabling removes the local recovery copy without
+closing current tabs. Unsaved text is kept privately in the application data
+directory, not written to source files automatically.
+
+Clean files reload their latest disk contents. If an edited file has changed
+externally or is no longer accessible, its draft opens as an untitled recovery
+tab instead of silently overwriting the original. Snapshots are bounded and
+written atomically; normal close waits for the latest editor state. A forced
+kill or storage failure can still lose edits newer than the last successful
+snapshot. Invalid old state is preserved for recovery before new data replaces
+it, and cleanup failures are reported. Limits are 64 editable tabs, 1 MiB per
+buffer/baseline and 32 MiB of recovery state.
+
+This does **not** restore interpreter variables, function registrations, figures,
+console history or a paused debugger, and it never replays Sun source.
+Temporary read-only debugger source tabs are not restored. Engine and graphics
+settings retain their own independent preferences.
+
 ### Interpreter debugger
 
 Sun Studio can debug editor buffers, including unsaved scripts, using the real
@@ -997,7 +1020,8 @@ enable unsafe software-rendering flags unless the user opts in. If Chromium
 reports `Error creating WebGL context`, save work, close Studio and try
 `sun-studio --software-rendering`, or use the error panel's software/restart
 action. The confirmation explains the CPU/security tradeoff and loss of
-unsaved/session state. This setting requires restarting Studio, not just its
+runtime session state; unsaved editor text is recovered only if tab restoration
+is enabled. This setting requires restarting Studio, not just its
 Rust engine. `--automatic-rendering` selects the normal default again.
 Surface color maps and point picking are not configurable yet. `mesh`,
 `meshgrid`, `scatter3`, transparency options, equal-axis aspect, orthographic
@@ -1198,6 +1222,7 @@ scripts. Clear Session resets variables and functions, while Clear Console only 
 transcript. Cooperative Stop preserves completed assignments and bypasses
 `catch`; a numerical operation that cannot stop promptly may require killing
 the engine, which explicitly clears the Workspace. Sessions are not saved to
-disk or reconstructed by replay after shutdown or engine replacement.
+disk or reconstructed by replay after shutdown or engine replacement. This
+refers to runtime state; editor-tab recovery is configured separately above.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design notes.
