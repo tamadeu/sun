@@ -110,12 +110,12 @@ fn eval(expr: &Expr, env: &mut HashMap<String, Value>, output: &mut Vec<String>)
                     return Err(RuntimeError::Arity(name.clone(), "two indices: A(row, column)".into()));
                 }
                 let row = match eval(&arguments[0], env, output)? {
-                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
-                    other => return Err(RuntimeError::Unsupported(format!("matrix row index must be a non-negative integer, got {other}"))),
+                    Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 1.0 => n as usize,
+                    other => return Err(RuntimeError::Unsupported(format!("matrix row index must be a positive integer, got {other}"))),
                 };
                 let col = match eval(&arguments[1], env, output)? {
                     Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
-                    other => return Err(RuntimeError::Unsupported(format!("matrix column index must be a non-negative integer, got {other}"))),
+                    other => return Err(RuntimeError::Unsupported(format!("matrix column index must be a positive integer, got {other}"))),
                 };
                 return Ok(Value::Number(matrix.get(row, col)?));
             }
@@ -205,6 +205,18 @@ mod tests {
     fn indexes_matrices_using_one_based_coordinates() {
         let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(2, 1));").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn evaluates_matrix_indices_from_variables_and_expressions() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ni = 1 + 1;\\nj = i - 1;\\ndisp(A(i, j));").unwrap();
+        assert_eq!(execute(&module).unwrap(), vec!["3"]);
+    }
+
+    #[test]
+    fn rejects_fractional_dynamic_matrix_indices() {
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ni = 1.5;\\ndisp(A(i, 1));").unwrap();
+        assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
     }
 
     #[test]
