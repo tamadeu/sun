@@ -203,13 +203,13 @@ mod tests {
 
     #[test]
     fn indexes_matrices_using_one_based_coordinates() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ndisp(A(2, 1));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(2, 1));").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["3"]);
     }
 
     #[test]
     fn rejects_zero_based_matrix_indices() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\\ndisp(A(0, 1));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\ndisp(A(0, 1));").unwrap();
         assert!(execute(&module).unwrap_err().to_string().contains("out of bounds"));
     }
 
