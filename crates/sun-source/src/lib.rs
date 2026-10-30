@@ -23,7 +23,9 @@ impl SourceFile {
 
     pub fn line_column(&self, offset: usize) -> (usize, usize) {
         let bounded = offset.min(self.text.len());
-        let prefix = &self.text[..self.text.floor_char_boundary(bounded)];
+        let mut boundary = bounded;
+        while !self.text.is_char_boundary(boundary) { boundary -= 1; }
+        let prefix = &self.text[..boundary];
         let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
         let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
         (line, column)
