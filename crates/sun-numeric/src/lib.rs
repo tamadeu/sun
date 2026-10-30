@@ -41,6 +41,16 @@ impl SunMatrix {
         Ok(self.data[(row - 1, col - 1)])
     }
 
+    /// Mutates a value using Sun's 1-based indexing convention.
+    pub fn set(&mut self, row: usize, col: usize, value: f64) -> Result<(), MatrixError> {
+        let (rows, cols) = self.shape();
+        if row == 0 || col == 0 || row > rows || col > cols {
+            return Err(MatrixError::IndexOutOfBounds { row, col, rows, cols });
+        }
+        self.data[(row - 1, col - 1)] = value;
+        Ok(())
+    }
+
     pub fn add(&self, other: &Self) -> Result<Self, MatrixError> {
         if self.shape() != other.shape() { return Err(MatrixError::IncompatibleDimensions); }
         Ok(Self { data: &self.data + &other.data })
@@ -76,6 +86,14 @@ mod tests {
         assert_eq!(matrix.get(1, 1).unwrap(), 1.0);
         assert_eq!(matrix.get(2, 2).unwrap(), 4.0);
         assert!(matrix.get(0, 1).is_err());
+    }
+
+    #[test]
+    fn mutates_elements_using_one_based_indices() {
+        let mut matrix = sample();
+        matrix.set(2, 1, 99.0).unwrap();
+        assert_eq!(matrix.get(2, 1).unwrap(), 99.0);
+        assert!(matrix.set(0, 1, 0.0).is_err());
     }
 
     #[test]
