@@ -1,6 +1,6 @@
 //! Dense f64 matrix primitives. Public Sun indexing is 1-based.
 
-use ndarray::Array2;
+use ndarray::{s, Array2, ArrayView2};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -31,6 +31,19 @@ impl SunMatrix {
     }
 
     pub fn shape(&self) -> (usize, usize) { (self.data.nrows(), self.data.ncols()) }
+
+    /// Creates a read-only, zero-copy view over an inclusive 1-based rectangle.
+    pub fn view(&self, row_start: usize, row_end: usize, col_start: usize, col_end: usize)
+        -> Result<MatrixView<'_>, MatrixError>
+    {
+        let (rows, cols) = self.shape();
+        if row_start == 0 || col_start == 0 || row_start > row_end
+            || col_start > col_end || row_end > rows || col_end > cols
+        {
+            return Err(MatrixError::IndexOutOfBounds { row: row_end, col: col_end, rows, cols });
+        }
+        Ok(MatrixView { data: self.data.slice(s![row_start - 1..row_end, col_start - 1..col_end]) })
+    }
 
     /// Reads a value using Sun's 1-based indexing convention.
     pub fn get(&self, row: usize, col: usize) -> Result<f64, MatrixError> {
@@ -69,6 +82,31 @@ impl SunMatrix {
     pub fn to_rows(&self) -> Vec<Vec<f64>> {
         self.data.rows().into_iter().map(|row| row.to_vec()).collect()
     }
+
+}
+
+/// A read-only borrowed view. Cloning and transposing copy only view metadata.
+#[derive(Debug, Clone)]
+pub struct MatrixView<'a> { data: ArrayView2<'a, f64> }
+
+impl<'a> MatrixView<'a> {
+    pub fn shape(&self) -> (usize, usize) { (self.data.nrows(), self.data.ncols()) }
+
+    /// Reads using Sun's 1-based indexing convention.
+    pub fn get(&self, row: usize, col: usize) -> Result<f64, MatrixError> {
+        let (rows, cols) = self.shape();
+        if row == 0 || col == 0 || row > rows || col > cols {
+            return Err(MatrixError::IndexOutOfBounds { row, col, rows, cols });
+        }
+        Ok(self.data[(row - 1, col - 1)])
+    }
+
+    /// Returns a transposed view without allocating or copying elements.
+    pub fn transpose(self) -> MatrixView<'a> { MatrixView { data: self.data.reversed_axes() } }
+
+    pub fn to_rows(&self) -> Vec<Vec<f64>> {
+        self.data.rows().into_iter().map(|row| row.to_vec()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +116,26 @@ mod tests {
 
     fn sample() -> SunMatrix {
         SunMatrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap()
+    }
+
+    #[test]
+    fn creates_zero_copy_rectangular_views() {
+        let matrix = sample();
+        let view = matrix.view(1, 2, 2, 2).unwrap();
+        assert_eq!(view.shape(), (2, 1));
+        assert_eq!(view.to_rows(), vec![vec![2.0], vec![4.0]]);
+        assert!(matrix.view(0, 1, 1, 1).is_err());
+        assert!(matrix.view(2, 1, 1, 1).is_err());
+    }
+
+    #[test]
+    fn transposes_views_without_changing_the_source() {
+        let matrix = sample();
+        let transposed = matrix.view(1, 2, 1, 2).unwrap().transpose();
+        assert_eq!(transposed.shape(), (2, 2));
+        assert_eq!(transposed.to_rows(), vec![vec![1.0, 3.0], vec![2.0, 4.0]]);
+        assert_eq!(matrix.to_rows(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert_eq!(transposed.get(2, 1).unwrap(), 2.0);
     }
 
     #[test]
