@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn keeps_function_calls_as_expression_statements() {
         let module = parse("disp(A(1, 2));").unwrap();
-        assert!(matches!(module.statements[0].kind, StmtKind::Expr(_)));
+        assert!(matches!(&module.statements[0].kind, StmtKind::Expr(_)));
     }
 
     #[test]
