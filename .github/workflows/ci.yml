@@ -42,7 +42,7 @@ jobs:
           disp(D);
           disp(E);
           disp(F);
-          disp(A(2, 1));
+          i = 2;\n          j = 1 + 0;\n          disp(A(i, j));
           SUN
           cargo run -p sun -- compile /tmp/native-matrices.sun -o /tmp/native-matrices
           test "$(/tmp/native-matrices)" = "$(printf '7 10\n15 22\n1 4\n9 16\n2 4\n6 8\n2 4\n6 8\n0.5 1\n1.5 2\n3')"
