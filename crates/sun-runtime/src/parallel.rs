@@ -5,7 +5,7 @@ use sun_numeric::{MatrixError, SunMatrix};
 use super::{eval, index_number, ExecutionContext, NumericRange, RuntimeError, RuntimeHost, Value};
 
 const PURE_FUNCTIONS: &[&str] = &["keywords", "constants", "builtins", "complex", "real", "imag", "conj", "sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "mean", "min", "max", "zeros", "ones", "eye", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
-const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "clf"];
+const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "view", "colormap", "shading", "clf"];
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidParFor(message.into()) }
 

@@ -21,7 +21,7 @@ const MAX_MATRIX_ELEMENTS: u64 = 16_777_216;
 
 const LANGUAGE_KEYWORDS: &[&str] = &["break", "case", "catch", "continue", "else", "elseif", "end", "false", "for", "function", "if", "otherwise", "parfor", "return", "switch", "true", "try", "while"];
 const LANGUAGE_CONSTANTS: &[&str] = &["Inf", "NaN", "eps", "false", "flintmax", "i", "intmax", "intmin", "j", "pi", "realmax", "realmin", "true"];
-const LANGUAGE_BUILTINS: &[&str] = &["abs", "axis", "builtins", "clf", "complex", "conj", "constants", "cos", "det", "disp", "error", "exp", "eye", "grid", "imag", "isempty", "inv", "keywords", "legend", "log", "max", "mean", "min", "numel", "ones", "pause", "plot", "plot3", "readmatrix", "real", "rethrow", "sin", "size", "solve", "sqrt", "sum", "surf", "tan", "title", "transpose", "writematrix", "xlabel", "ylabel", "zeros", "zlabel"];
+const LANGUAGE_BUILTINS: &[&str] = &["abs", "axis", "builtins", "clf", "colormap", "complex", "conj", "constants", "cos", "det", "disp", "error", "exp", "eye", "grid", "imag", "isempty", "inv", "keywords", "legend", "log", "max", "mean", "min", "numel", "ones", "pause", "plot", "plot3", "readmatrix", "real", "rethrow", "shading", "sin", "size", "solve", "sqrt", "sum", "surf", "tan", "title", "transpose", "view", "writematrix", "xlabel", "ylabel", "zeros", "zlabel"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {

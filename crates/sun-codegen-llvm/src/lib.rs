@@ -63,7 +63,7 @@ impl Generator {
             }
             ExprKind::Call{callee,arguments}=>{
                 let ExprKind::Identifier(name)=&callee.kind else{return Err(BackendError::Unsupported("indirect calls".into()));};
-                if matches!(name.as_str(),"plot"|"plot3"|"surf"|"title"|"xlabel"|"ylabel"|"zlabel"|"legend"|"grid"|"axis"|"clf"){
+                if matches!(name.as_str(),"plot"|"plot3"|"surf"|"title"|"xlabel"|"ylabel"|"zlabel"|"legend"|"grid"|"axis"|"view"|"colormap"|"shading"|"clf"){
                     return Err(BackendError::Unsupported(format!("{name} requires a graphical interpreter host; use Sun Studio")));
                 }
                 if matches!(name.as_str(),"error"|"rethrow"|"pause"|"readmatrix"|"writematrix"){

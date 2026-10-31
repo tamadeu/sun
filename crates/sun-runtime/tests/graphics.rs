@@ -87,7 +87,7 @@ fn host_failure_does_not_commit_a_new_figure() {
 
 #[test]
 fn plotting_effects_are_rejected_before_parallel_execution() {
-    for name in ["plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "clf"] {
+    for name in ["plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "view", "colormap", "shading", "clf"] {
         let source = format!("plot(1,2); A=zeros(1,2); parfor index=1:2; temporary={name}(index); A(index)=1; end");
         let mut session = Session::new();
         let mut host = Host::default();

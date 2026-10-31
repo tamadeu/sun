@@ -991,6 +991,9 @@ Z = x .* x + y .* y;
 surf(x, y, Z);
 title("Paraboloide");
 xlabel("X"); ylabel("Y"); zlabel("Z");
+view(3);
+colormap("turbo");
+shading("faceted");
 grid(true);
 axis([-2, 2, -2, 2, 0, 8]);
 ```
@@ -1003,6 +1006,13 @@ changes preserve an interactive camera. Orbit controls support rotation, zoom
 and pan, with buttons for camera reset and PNG export. Export includes title,
 axis labels, legend and the surface height-color scale, up to 2x viewport
 resolution capped at 4096 pixels per dimension.
+
+`view(3)` selects the standard perspective, `view(2)` selects a top view, and
+`view(azimuth,elevation)` accepts angles in degrees with elevation from -90 to
+90. Surfaces support `colormap("sun")`, `"parula"`, `"turbo"`, `"gray"`,
+`"hot"`, or `"cool"`. Use `shading("smooth")`, `"flat"`, or `"faceted"` to
+control surface normals and mesh edges. These settings persist until a new
+plot replaces the figure; explicit `view` and axis commands reset the camera.
 
 Rendering maps each axis independently into a unit cube; it does not imply
 equal physical axis scales. Camera projection is perspective. View clipping
@@ -1023,7 +1033,7 @@ action. The confirmation explains the CPU/security tradeoff and loss of
 runtime session state; unsaved editor text is recovered only if tab restoration
 is enabled. This setting requires restarting Studio, not just its
 Rust engine. `--automatic-rendering` selects the normal default again.
-Surface color maps and point picking are not configurable yet. `mesh`,
+Point picking is not configurable yet. `mesh`,
 `meshgrid`, `scatter3`, transparency options, equal-axis aspect, orthographic
 projection, `hold`, subplots and multiple active figures remain future work.
 3D effects are interpreter-only and forbidden in `parfor`, like 2D effects.

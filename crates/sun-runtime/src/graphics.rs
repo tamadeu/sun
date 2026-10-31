@@ -10,7 +10,7 @@ pub struct FigureTrace {
     pub y: Vec<Option<f64>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FigureLayout {
     pub title: String,
@@ -24,6 +24,20 @@ pub struct FigureLayout {
     pub y_range: Option<[f64; 2]>,
     pub z_range: Option<[f64; 2]>,
     pub axis_revision: u32,
+    pub view: Option<[f64; 2]>,
+    pub colormap: String,
+    pub shading: String,
+}
+
+impl Default for FigureLayout {
+    fn default() -> Self {
+        Self {
+            title: String::new(), x_label: String::new(), y_label: String::new(), z_label: String::new(),
+            legend: Vec::new(), show_legend: false, grid: false,
+            x_range: None, y_range: None, z_range: None, axis_revision: 0, view: None,
+            colormap: "sun".into(), shading: "smooth".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -54,7 +68,7 @@ pub(super) struct GraphicsState {
 }
 
 pub(super) fn handles(name: &str) -> bool {
-    matches!(name, "plot" | "plot3" | "surf" | "title" | "xlabel" | "ylabel" | "zlabel" | "legend" | "grid" | "axis" | "clf")
+    matches!(name, "plot" | "plot3" | "surf" | "title" | "xlabel" | "ylabel" | "zlabel" | "legend" | "grid" | "axis" | "view" | "colormap" | "shading" | "clf")
 }
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidArgument(message.into()) }
@@ -164,6 +178,30 @@ pub(super) fn call(name: &str, args: &[Value], context: &mut ExecutionContext<'_
             _ => return Err(invalid("axis expects four limits or 'auto'")),
         }
             layout.axis_revision = layout.axis_revision.checked_add(1).ok_or_else(|| invalid("axis revision limit reached; create a new plot"))?;
+        },
+        "view" => {
+            if figure.scene.is_none() { return Err(invalid("view requires a 3D figure")); }
+            layout.view = match args {
+                [Value::Number(2.0)] => Some([0.0, 90.0]),
+                [Value::Number(3.0)] => Some([-37.5, 30.0]),
+                [Value::Number(azimuth), Value::Number(elevation)] if azimuth.is_finite() && elevation.is_finite() && (-90.0..=90.0).contains(elevation) => Some([*azimuth, *elevation]),
+                _ => return Err(invalid("view expects 2, 3, or finite azimuth and elevation (elevation from -90 to 90)")),
+            };
+            layout.axis_revision = layout.axis_revision.checked_add(1).ok_or_else(|| invalid("view revision limit reached; create a new plot"))?;
+        },
+        "colormap" => {
+            if !matches!(figure.scene, Some(Scene3D::Surface { .. })) { return Err(invalid("colormap requires a surface figure")); }
+            layout.colormap = match args {
+                [Value::String(name)] if matches!(name.as_str(), "sun" | "parula" | "turbo" | "gray" | "hot" | "cool") => name.clone(),
+                _ => return Err(invalid("colormap expects 'sun', 'parula', 'turbo', 'gray', 'hot', or 'cool'")),
+            };
+        },
+        "shading" => {
+            if !matches!(figure.scene, Some(Scene3D::Surface { .. })) { return Err(invalid("shading requires a surface figure")); }
+            layout.shading = match args {
+                [Value::String(mode)] if matches!(mode.as_str(), "smooth" | "flat" | "faceted") => mode.clone(),
+                _ => return Err(invalid("shading expects 'smooth', 'flat', or 'faceted'")),
+            };
         },
         _ => unreachable!(),
     }

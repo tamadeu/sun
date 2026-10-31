@@ -6,5 +6,8 @@ title("Paraboloide");
 xlabel("X");
 ylabel("Y");
 zlabel("Z");
+view(3);
+colormap("turbo");
+shading("faceted");
 grid(true);
 axis([-2, 2, -2, 2, 0, 8]);

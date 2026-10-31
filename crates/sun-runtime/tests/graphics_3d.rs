@@ -57,6 +57,30 @@ fn matrix_columns_create_multiple_3d_curves_and_labels_persist() {
 }
 
 #[test]
+fn view_and_surface_style_update_the_current_figure() {
+    let mut session = Session::new(); let mut host = Host::default();
+    run(&mut session, &mut host, "surf([1,2;3,4]); view(3); colormap(\"turbo\"); shading(\"faceted\");").unwrap();
+    let layout = &session.figure().unwrap().layout;
+    assert_eq!(layout.view, Some([-37.5,30.0]));
+    assert_eq!(layout.axis_revision, 1);
+    assert_eq!(layout.colormap, "turbo");
+    assert_eq!(layout.shading, "faceted");
+    run(&mut session, &mut host, "view(125,-20); shading(\"flat\");").unwrap();
+    assert_eq!(session.figure().unwrap().layout.view, Some([125.0,-20.0]));
+}
+
+#[test]
+fn invalid_3d_customization_preserves_the_layout() {
+    let mut session = Session::new(); let mut host = Host::default();
+    run(&mut session, &mut host, "surf(ones(2));").unwrap();
+    let previous = session.figure().unwrap().layout.clone();
+    for source in ["view(1);", "view(0,91);", "colormap(\"unknown\");", "shading(\"wire\");"] {
+        assert!(run(&mut session, &mut host, source).is_err(), "accepted {source}");
+        assert_eq!(session.figure().unwrap().layout, previous);
+    }
+}
+
+#[test]
 fn isolated_extreme_vertices_do_not_reject_or_shrink_valid_surface_cells() {
     let mut session = Session::new(); let mut host = Host::default();
     run(&mut session, &mut host, "X=[0,1,0;0,1,0;0,0,1e300]; Y=[0,0,0;1,1,0;0,0,1e300]; Z=[0,0,0/0;0,0,0/0;0/0,0/0,0]; surf(X,Y,Z);").unwrap();
