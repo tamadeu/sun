@@ -28,6 +28,7 @@ pub(super) fn variable(name: &str, value: &Value) -> JsonValue {
     match value {
         Value::Bool(_) => json!({"name":name,"kind":"boolean","rows":1,"cols":1,"value":value.to_string(),"preview":[],"truncated":false}),
         Value::Number(number) => json!({"name":name,"kind":"number","rows":1,"cols":1,"value":value.to_string(),"preview":[[numeric(*number)]],"truncated":false}),
+        Value::Complex(_) => json!({"name":name,"kind":"complex","rows":1,"cols":1,"value":value.to_string(),"preview":[],"truncated":false}),
         Value::Matrix(matrix) => {
             let (rows, cols) = matrix.shape();
             let preview: Vec<Vec<_>> = (1..=rows.min(PREVIEW_SIZE)).map(|row| {
@@ -48,9 +49,14 @@ pub(super) fn variable(name: &str, value: &Value) -> JsonValue {
 
 pub(super) fn parse_diagnostic(source: &str, error: &ParseError) -> JsonValue {
     let offset = match error {
-        ParseError::UnexpectedToken { offset, .. } | ParseError::LoopControlOutsideLoop { offset, .. } => *offset,
+        ParseError::UnexpectedToken { offset, .. }
+        | ParseError::ReservedConstant { offset, .. }
+        | ParseError::LoopControlOutsideLoop { offset, .. } => *offset,
         ParseError::Lex(error) => match error {
-            LexError::UnexpectedCharacter { offset, .. } | LexError::UnterminatedString { offset } | LexError::InvalidNumber { offset } => *offset,
+            LexError::UnexpectedCharacter { offset, .. }
+            | LexError::UnterminatedString { offset }
+            | LexError::UnterminatedBlockComment { offset }
+            | LexError::InvalidNumber { offset } => *offset,
         },
     };
     let prefix = source.get(..offset).unwrap_or(source);
@@ -165,6 +171,18 @@ mod tests {
     }
 
     #[test]
+    fn serializes_complex_workspace_values_without_real_preview() {
+        let (ok, records) = events("z = 2 - 3 * i;", false, b"");
+        assert!(ok);
+        let value = &records[1]["variables"][0];
+        assert_eq!(value["kind"], "complex");
+        assert_eq!(value["value"], "2 - 3i");
+        assert_eq!(value["rows"], 1);
+        assert_eq!(value["cols"], 1);
+        assert_eq!(value["preview"], json!([]));
+    }
+
+    #[test]
     fn streams_output_and_real_workspace_including_empty_shapes() {
         let (ok, records) = events("A = [1, 2; 3, 4]; E = A(2:1, :); disp(A);", false, b"");
         assert!(ok);
@@ -195,6 +213,15 @@ mod tests {
         assert!(!ok);
         assert_eq!(records[1]["diagnostic"]["line"], 2);
         assert_eq!(records[1]["diagnostic"]["column"], 9);
+        let (ok, records) = events("value = 1;\n%{ not closed", true, b"");
+        assert!(!ok);
+        assert_eq!(records[1]["diagnostic"]["line"], 2);
+        assert_eq!(records[1]["diagnostic"]["column"], 1);
+        let (ok, records) = events("value = 1;\npi = 3;", true, b"");
+        assert!(!ok);
+        assert_eq!(records[1]["diagnostic"]["line"], 2);
+        assert_eq!(records[1]["diagnostic"]["column"], 1);
+        assert!(records[1]["diagnostic"]["message"].as_str().unwrap().contains("cannot be overwritten"));
     }
 
     #[test]

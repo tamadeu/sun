@@ -21,12 +21,14 @@ struct Generator { next_value: usize, variables: HashMap<String, NativeValue>, b
 impl Generator {
     fn value(&mut self) -> String { let name=format!("%v{}",self.next_value);self.next_value+=1;name }
     fn emit(&mut self,line:String){self.body.push(format!("  {line}"));}
+    fn number(value:f64)->String{if value.is_finite(){format!("{value:.17e}")}else{format!("0x{:016X}",value.to_bits())}}
     fn scalar(&mut self,expr:&Expr)->Result<String,BackendError>{
         match self.expression(expr)? { NativeValue::Scalar(v)=>Ok(v), NativeValue::Matrix{..}=>Err(BackendError::Unsupported("expected a scalar expression".into())) }
     }
     fn expression(&mut self,expr:&Expr)->Result<NativeValue,BackendError>{
         match &expr.kind {
-            ExprKind::Number(n)=>Ok(NativeValue::Scalar(format!("{:.17e}",n))),
+            ExprKind::Number(n)=>Ok(NativeValue::Scalar(Self::number(*n))),
+            ExprKind::Complex{..}=>Err(BackendError::Unsupported("complex numbers are only available in the interpreter; use sun run".into())),
             ExprKind::Bool(_)=>Err(BackendError::Unsupported("booleans are only available in the interpreter; use sun run".into())),
             ExprKind::IndexEnd=>Err(BackendError::Unsupported("end in matrix indices is only available in the interpreter; use sun run".into())),
             ExprKind::IndexAll|ExprKind::IndexRange{..}=>Err(BackendError::Unsupported("ranges and matrix slices are only available in the interpreter; use sun run".into())),
@@ -216,12 +218,14 @@ mod tests{
  #[test]fn rejects_while_with_interpreter_guidance(){let ast=parse("while 0\nend").unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("while loops"));assert!(error.contains("sun run"));}
  #[test]fn compiles_matrix_literal_and_print(){let ast=parse("A=[1,2;3,4];\ndisp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_create(i64 2, i64 2)"));assert!(ir.contains("call void @sun_matrix_print"));assert!(ir.contains("call void @sun_runtime_check_matrix"));
  assert!(ir.contains("call void @sun_runtime_cleanup"));}
+ #[test]fn compiles_predefined_constants_including_special_values(){let ast=parse("disp(pi); disp(Inf); disp(NaN);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("3.14159265358979312e0"));assert!(ir.contains("0x7FF0000000000000"));assert!(ir.contains("0x7FF8000000000000"));}
  #[test]fn matrix_aliases_and_reassignments_use_single_runtime_cleanup(){let ast=parse("A=[1,2;3,4]; B=A; A=A*A; disp(B); disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert_eq!(ir.matches("call void @sun_runtime_cleanup()").count(),1);assert!(ir.matches("call void @sun_runtime_check_matrix").count()>=2);}
  #[test]fn compiles_matrix_multiplication(){let ast=parse("A=[1,2;3,4]; B=A*A; disp(B);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call ptr @sun_matrix_multiply"));}
  #[test]fn reads_matrix_elements_with_one_based_indices(){let ast=parse("A=[1,2;3,4]; disp(A(2,1));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get"));}
- #[test]fn compiles_indexed_matrix_assignment(){let ast=parse("A=[1,2;3,4]; i=2; j=1; A(i,j)=99; disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call void @sun_matrix_set_indexed"));assert!(ir.contains("call void @sun_matrix_print"));}
+ #[test]fn compiles_indexed_matrix_assignment(){let ast=parse("A=[1,2;3,4]; row_index=2; column_index=1; A(row_index,column_index)=99; disp(A);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call void @sun_matrix_set_indexed"));assert!(ir.contains("call void @sun_matrix_print"));}
  #[test]fn rejects_out_of_bounds_literal_assignment(){let ast=parse("A=[1,2;3,4]; A(3,1)=9;").unwrap();assert!(compile_to_llvm_ir(&ast).unwrap_err().to_string().contains("outside the 1-based shape"));}
- #[test]fn compiles_dynamic_matrix_indices(){let ast=parse("A=[1,2;3,4]; i=2; j=1+0; disp(A(i,j));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get_indexed"));}
+ #[test]fn compiles_dynamic_matrix_indices(){let ast=parse("A=[1,2;3,4]; row_index=2; column_index=1+0; disp(A(row_index,column_index));").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_matrix_get_indexed"));}
+ #[test]fn rejects_complex_numbers_with_interpreter_guidance(){for source in ["disp(i);","value=complex(2,3);"]{let ast=parse(source).unwrap();let error=compile_to_llvm_ir(&ast).unwrap_err().to_string();assert!(error.contains("complex"));assert!(error.contains("sun run"));}}
  #[test]fn lowers_math_functions_through_the_runtime_abi(){let ast=parse("x=sqrt(81); y=sin(0);").unwrap();let ir=compile_to_llvm_ir(&ast).unwrap();assert!(ir.contains("call double @sun_rt_sqrt"));assert!(ir.contains("call double @sun_rt_sin"));}
  #[test]fn rejects_zero_based_index(){let ast=parse("A=[1,2;3,4]; disp(A(0,1));").unwrap();assert!(compile_to_llvm_ir(&ast).unwrap_err().to_string().contains("1-based"));}
 }

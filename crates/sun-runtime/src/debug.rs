@@ -84,6 +84,7 @@ fn variables(env: &HashMap<String, Value>) -> Vec<DebugVariable> {
                 summary.truncated = !matrix.is_empty() && (rows > 5 || cols > 5);
             }
             Value::Number(value) => { summary.kind = "number"; summary.rows = Some(1); summary.cols = Some(1); summary.value = Value::Number(*value).to_string(); summary.preview = vec![vec![number(*value)]]; }
+            Value::Complex(value) => { summary.kind = "complex"; summary.rows = Some(1); summary.cols = Some(1); summary.value = Value::Complex(*value).to_string(); }
             Value::Bool(value) => { summary.kind = "boolean"; summary.rows = Some(1); summary.cols = Some(1); summary.value = value.to_string(); }
             other => {
                 summary.kind = match other { Value::String(_) => "string", Value::Exception(_) => "exception", _ => "void" };
@@ -214,5 +215,16 @@ mod tests {
         assert!(summary[0].truncated);
         for index in 0..150 { env.insert(format!("variable{index}"), Value::Number(1.0)); }
         assert_eq!(variables(&env).len(), 100);
+    }
+
+    #[test]
+    fn complex_snapshots_are_textual_scalars() {
+        let env = HashMap::from([("z".into(), Value::Complex(num_complex::Complex64::new(2.0, -3.0)))]);
+        let summary = variables(&env);
+        assert_eq!(summary[0].kind, "complex");
+        assert_eq!(summary[0].value, "2 - 3i");
+        assert_eq!(summary[0].rows, Some(1));
+        assert_eq!(summary[0].cols, Some(1));
+        assert!(summary[0].preview.is_empty());
     }
 }

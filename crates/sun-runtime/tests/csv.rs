@@ -69,7 +69,7 @@ fn empty_csv_is_zero_by_zero_and_scalar_and_special_values_round_trip() {
     run(&mut session, &mut host, "writematrix([],\"empty.csv\"); E=readmatrix(\"empty.csv\"); disp(size(E)); writematrix(42,\"scalar.csv\"); disp(readmatrix(\"scalar.csv\")); writematrix([0/0,1/0,-1/0],\"special.csv\"); S=readmatrix(\"special.csv\"); disp(S);").unwrap();
     assert_eq!(host.files["empty.csv"], b"");
     assert_eq!(host.files["special.csv"], b"NaN,Inf,-Inf\n");
-    assert_eq!(host.lines, ["[0, 0]", "[42]", "[NaN, inf, -inf]"]);
+    assert_eq!(host.lines, ["[0, 0]", "[42]", "[NaN, Inf, -Inf]"]);
     assert!(matches!(session.variables()["E"], Value::Matrix(_)));
 }
 

@@ -4,7 +4,7 @@ use sun_ast::{Expr, ExprKind, FunctionDefinition, Module, Stmt, StmtKind};
 use sun_numeric::{MatrixError, SunMatrix};
 use super::{eval, index_number, ExecutionContext, NumericRange, RuntimeError, RuntimeHost, Value};
 
-const PURE_FUNCTIONS: &[&str] = &["sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "mean", "min", "max", "zeros", "ones", "eye", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
+const PURE_FUNCTIONS: &[&str] = &["keywords", "constants", "builtins", "complex", "real", "imag", "conj", "sqrt", "sin", "cos", "tan", "abs", "exp", "log", "sum", "mean", "min", "max", "zeros", "ones", "eye", "transpose", "det", "inv", "solve", "size", "numel", "isempty"];
 const EFFECT_FUNCTIONS: &[&str] = &["disp", "pause", "error", "rethrow", "readmatrix", "writematrix", "plot", "plot3", "surf", "title", "xlabel", "ylabel", "zlabel", "legend", "grid", "axis", "clf"];
 
 fn invalid(message: impl Into<String>) -> RuntimeError { RuntimeError::InvalidParFor(message.into()) }
@@ -133,7 +133,7 @@ fn validate_expression(expr: &Expr, iterator: &str, temporaries: &BTreeSet<Strin
             if let Some(step) = step { validate_expression(step, iterator, temporaries, initialized, outputs, inputs)?; }
             validate_expression(stop, iterator, temporaries, initialized, outputs, inputs)?;
         }
-        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::String(_) | ExprKind::IndexEnd | ExprKind::IndexAll => {}
+        ExprKind::Number(_) | ExprKind::Complex { .. } | ExprKind::Bool(_) | ExprKind::String(_) | ExprKind::IndexEnd | ExprKind::IndexAll => {}
     }
     Ok(())
 }
@@ -452,6 +452,12 @@ mod tests {
     #[test]
     fn worker_output_type_errors_do_not_commit_earlier_writes() {
         let source = "first = [0, 0]; second = [0, 0]; try; parfor index = 1:2; first(index) = index; second(index) = [index]; end; catch failure; disp(failure.identifier); end; disp(first); disp(second);";
+        assert_eq!(run(source).unwrap(), vec!["Sun:InvalidParFor", "[0, 0]", "[0, 0]"]);
+    }
+
+    #[test]
+    fn complex_outputs_do_not_commit_real_matrix_writes() {
+        let source = "first = [0, 0]; second = [0, 0]; try; parfor index = 1:2; first(index) = index; second(index) = index * i; end; catch failure; disp(failure.identifier); end; disp(first); disp(second);";
         assert_eq!(run(source).unwrap(), vec!["Sun:InvalidParFor", "[0, 0]", "[0, 0]"]);
     }
 

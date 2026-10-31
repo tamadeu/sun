@@ -12,15 +12,21 @@ pub use graphics::{Figure, FigureEvent, FigureLayout, FigureTrace};
 pub use graphics3d::{Curve3D, Scene3D};
 
 use std::{collections::HashMap, io, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+use num_complex::Complex64;
 use sun_ast::{BinaryOp, Expr, ExprKind, FunctionDefinition, Module, Stmt, StmtKind, UnaryOp};
 use sun_numeric::{MatrixError, SunMatrix};
 use thiserror::Error;
 
 const MAX_MATRIX_ELEMENTS: u64 = 16_777_216;
 
+const LANGUAGE_KEYWORDS: &[&str] = &["break", "case", "catch", "continue", "else", "elseif", "end", "false", "for", "function", "if", "otherwise", "parfor", "return", "switch", "true", "try", "while"];
+const LANGUAGE_CONSTANTS: &[&str] = &["Inf", "NaN", "eps", "false", "flintmax", "i", "intmax", "intmin", "j", "pi", "realmax", "realmin", "true"];
+const LANGUAGE_BUILTINS: &[&str] = &["abs", "axis", "builtins", "clf", "complex", "conj", "constants", "cos", "det", "disp", "error", "exp", "eye", "grid", "imag", "isempty", "inv", "keywords", "legend", "log", "max", "mean", "min", "numel", "ones", "pause", "plot", "plot3", "readmatrix", "real", "rethrow", "sin", "size", "solve", "sqrt", "sum", "surf", "tan", "title", "transpose", "writematrix", "xlabel", "ylabel", "zeros", "zlabel"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
+    Complex(Complex64),
     Bool(bool),
     String(String),
     Matrix(SunMatrix),
@@ -35,12 +41,40 @@ pub struct SunException {
     pub message: String,
 }
 
+fn display_number(number: f64, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if number.is_nan() { write!(formatter, "NaN") }
+    else if number == f64::INFINITY { write!(formatter, "Inf") }
+    else if number == f64::NEG_INFINITY { write!(formatter, "-Inf") }
+    else if number.fract() == 0.0 && number.abs() < 1e15 { write!(formatter, "{number:.0}") }
+    else { write!(formatter, "{number}") }
+}
+
+fn number_text(number: f64) -> String {
+    struct Number(f64);
+    impl std::fmt::Display for Number {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { display_number(self.0, formatter) }
+    }
+    Number(number).to_string()
+}
+
+fn display_complex(value: Complex64, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if value.re == 0.0 {
+        return match value.im {
+            1.0 => write!(formatter, "i"),
+            -1.0 => write!(formatter, "-i"),
+            imaginary => write!(formatter, "{}i", number_text(imaginary)),
+        };
+    }
+    let operator = if value.im.is_sign_negative() { '-' } else { '+' };
+    write!(formatter, "{} {operator} {}i", number_text(value.re), number_text(value.im.abs()))
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bool(value) => write!(f, "{value}"),
-            Self::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => write!(f, "{n:.0}"),
-            Self::Number(n) => write!(f, "{n}"),
+            Self::Number(number) => display_number(*number, f),
+            Self::Complex(value) => display_complex(*value, f),
             Self::String(s) => write!(f, "{s}"),
             Self::Matrix(matrix) if matrix.is_empty() => write!(f, "[]"),
             Self::Matrix(m) => {
@@ -49,8 +83,7 @@ impl std::fmt::Display for Value {
                     if ri > 0 { write!(f, "; ")?; }
                     for (ci, value) in row.iter().enumerate() {
                         if ci > 0 { write!(f, ", ")?; }
-                        if value.fract() == 0.0 && value.abs() < 1e15 { write!(f, "{value:.0}")?; }
-                        else { write!(f, "{value}")?; }
+                        display_number(*value, f)?;
                     }
                 }
                 write!(f, "]")
@@ -718,6 +751,7 @@ fn eval(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext
 fn eval_expression(expr: &Expr, env: &HashMap<String, Value>, output: &mut ExecutionContext<'_>, allow_void: bool) -> Result<Value, RuntimeError> {
     match &expr.kind {
         ExprKind::Number(n) => Ok(Value::Number(*n)),
+        ExprKind::Complex { real, imaginary } => Ok(Value::Complex(Complex64::new(*real, *imaginary))),
         ExprKind::Bool(value) => Ok(Value::Bool(*value)),
         ExprKind::String(s) => Ok(Value::String(s.clone())),
         ExprKind::IndexEnd => output.index_end.map(|dimension| Value::Number(dimension as f64))
@@ -782,6 +816,8 @@ fn eval_expression(expr: &Expr, env: &HashMap<String, Value>, output: &mut Execu
             match (op, value) {
                 (UnaryOp::Positive, Value::Number(n)) => Ok(Value::Number(n)),
                 (UnaryOp::Negative, Value::Number(n)) => Ok(Value::Number(-n)),
+                (UnaryOp::Positive, Value::Complex(value)) => Ok(Value::Complex(value)),
+                (UnaryOp::Negative, Value::Complex(value)) => Ok(Value::Complex(-value)),
                 (UnaryOp::Positive, Value::Bool(value)) => Ok(Value::Number(u8::from(value) as f64)),
                 (UnaryOp::Negative, Value::Bool(value)) => Ok(Value::Number(-(u8::from(value) as f64))),
                 (UnaryOp::Not, value) => Ok(Value::Bool(!scalar_condition(value, "logical negation")?)),
@@ -890,6 +926,9 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
     let left = match left { Value::Bool(value) => Value::Number(u8::from(value) as f64), other => other };
     let right = match right { Value::Bool(value) => Value::Number(u8::from(value) as f64), other => other };
     match (left, right) {
+        (Value::Complex(a), Value::Complex(b)) => complex_binary(a, op, b),
+        (Value::Complex(a), Value::Number(b)) => complex_binary(a, op, Complex64::new(b, 0.0)),
+        (Value::Number(a), Value::Complex(b)) => complex_binary(Complex64::new(a, 0.0), op, b),
         (Value::Number(a), Value::Number(b)) => {
             if matches!(op, Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual) {
                 return Ok(Value::Bool(match op {
@@ -921,6 +960,24 @@ fn binary(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError
     }
 }
 
+fn complex_binary(left: Complex64, op: BinaryOp, right: Complex64) -> Result<Value, RuntimeError> {
+    use BinaryOp::*;
+    match op {
+        Add => Ok(Value::Complex(left + right)),
+        Subtract => Ok(Value::Complex(left - right)),
+        Multiply | ElementMultiply => Ok(Value::Complex(left * right)),
+        Divide | ElementDivide => Ok(Value::Complex(left / right)),
+        Power if right.im == 0.0 && right.re.fract() == 0.0 && right.re >= i32::MIN as f64 && right.re <= i32::MAX as f64 => {
+            Ok(Value::Complex(left.powi(right.re as i32)))
+        }
+        Power => Ok(Value::Complex(left.powc(right))),
+        Equal => Ok(Value::Bool(left == right)),
+        NotEqual => Ok(Value::Bool(left != right)),
+        Less | LessEqual | Greater | GreaterEqual => Err(RuntimeError::Unsupported("complex numbers cannot be ordered".into())),
+        And | Or => unreachable!("logical operators are evaluated with short-circuiting"),
+    }
+}
+
 fn matrix_map(matrix: &SunMatrix, f: impl Fn(f64) -> f64) -> Result<SunMatrix, MatrixError> {
     Ok(matrix.map(f))
 }
@@ -933,7 +990,22 @@ fn valid_error_identifier(identifier: &str) -> bool {
     })
 }
 
+fn language_list(name: &str, args: &[Value]) -> Result<Option<Value>, RuntimeError> {
+    let items = match name {
+        "keywords" => LANGUAGE_KEYWORDS,
+        "constants" => LANGUAGE_CONSTANTS,
+        "builtins" => LANGUAGE_BUILTINS,
+        _ => return Ok(None),
+    };
+    if !args.is_empty() { return Err(RuntimeError::Arity(name.into(), "no arguments".into())); }
+    let mut items = items.to_vec();
+    items.sort_unstable();
+    items.dedup();
+    Ok(Some(Value::String(items.join("\n"))))
+}
+
 fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Result<Value, RuntimeError> {
+    if let Some(value) = language_list(name, &args)? { return Ok(value); }
     if graphics::handles(name) { return graphics::call(name, &args, output); }
     if matches!(name, "readmatrix" | "writematrix") { return matrix_csv::call(name, &args, output); }
     if name == "pause" {
@@ -993,6 +1065,45 @@ fn call(name: &str, args: Vec<Value>, output: &mut ExecutionContext<'_>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluates_complex_constants_arithmetic_and_functions() {
+        let source = "z = 2 + 3 * i; disp(i); disp(j); disp(z); disp(-z); disp(z + 1); disp(z * i); disp(z / i); disp(i * i); disp(i ^ 2); disp(z == complex(2, 3)); disp(real(z)); disp(imag(z)); disp(conj(z)); disp(abs(3 + 4 * i)); disp(sqrt(-1));";
+        let output = execute(&sun_parser::parse(source).unwrap()).unwrap();
+        assert_eq!(output, ["i", "i", "2 + 3i", "-2 - 3i", "3 + 3i", "-3 + 2i", "3 - 2i", "-1 + 0i", "-1 + 0i", "true", "2", "3", "2 - 3i", "5", "i"]);
+    }
+
+    #[test]
+    fn lists_language_keywords_constants_and_builtins() {
+        let output = execute(&sun_parser::parse("keywords()\nconstants()\nbuiltins()").unwrap()).unwrap();
+        assert_eq!(output.len(), 3);
+        for (list, required) in [(&output[0], ["function", "if", "while"]), (&output[1], ["pi", "i", "true"]), (&output[2], ["disp", "complex", "keywords"])] {
+            let entries: Vec<_> = list.lines().collect();
+            assert!(required.into_iter().all(|name| entries.contains(&name)));
+            assert!(entries.windows(2).all(|pair| pair[0] < pair[1]), "list is not sorted and unique: {entries:?}");
+        }
+        for name in ["keywords", "constants", "builtins"] {
+            assert!(matches!(execute(&sun_parser::parse(&format!("{name}(1);")).unwrap()), Err(RuntimeError::Arity(_, _))));
+        }
+    }
+
+    #[test]
+    fn rejects_complex_values_at_real_only_boundaries() {
+        for source in ["value = [i];", "if i; end", "for value = i; end", "A = [1]; A(1) = i;"] {
+            let error = execute(&sun_parser::parse(source).unwrap()).unwrap_err().to_string();
+            assert!(error.contains("number") || error.contains("condition") || error.contains("source"), "unexpected error for {source}: {error}");
+        }
+    }
+
+    #[test]
+    fn evaluates_predefined_constants_without_workspace_bindings() {
+        let module = sun_parser::parse("disp(pi); disp(Inf); disp(NaN); disp(eps); disp(intmin); disp(intmax);").unwrap();
+        let mut session = Session::new();
+        let mut host = CollectingHost { lines: Vec::new() };
+        session.execute(&module, &mut host).unwrap();
+        assert_eq!(host.lines, ["3.141592653589793", "Inf", "NaN", "0.0000000000000002220446049250313", "-2147483648", "2147483647"]);
+        assert!(session.variables().is_empty());
+    }
 
     #[test]
     fn session_executes_only_new_code_and_retains_variables() {
@@ -2542,13 +2653,13 @@ mod tests {
 
     #[test]
     fn evaluates_matrix_indices_from_variables_and_expressions() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 1 + 1;\nj = i - 1;\ndisp(A(i, j));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\nrow_index = 1 + 1;\ncolumn_index = row_index - 1;\ndisp(A(row_index, column_index));").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["3"]);
     }
 
     #[test]
     fn assigns_matrix_elements_with_literal_and_dynamic_indices() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 2;\nj = 1;\nA(i, j) = 99;\nA(1, 2) = 42;\ndisp(A);").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\nrow_index = 2;\ncolumn_index = 1;\nA(row_index, column_index) = 99;\nA(1, 2) = 42;\ndisp(A);").unwrap();
         assert_eq!(execute(&module).unwrap(), vec!["[1, 42; 99, 4]"]);
     }
 
@@ -2560,7 +2671,7 @@ mod tests {
 
     #[test]
     fn rejects_fractional_dynamic_matrix_indices() {
-        let module = sun_parser::parse("A = [1, 2; 3, 4];\ni = 1.5;\ndisp(A(i, 1));").unwrap();
+        let module = sun_parser::parse("A = [1, 2; 3, 4];\nrow_index = 1.5;\ndisp(A(row_index, 1));").unwrap();
         assert!(execute(&module).unwrap_err().to_string().contains("positive integer"));
     }
 

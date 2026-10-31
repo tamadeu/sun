@@ -12,6 +12,7 @@ rayon = "1.11"
 csv = "1"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
+num-complex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

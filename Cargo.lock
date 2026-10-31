@@ -690,6 +690,7 @@ name = "sun-runtime"
 version = "0.6.0"
 dependencies = [
  "csv",
+ "num-complex",
  "rayon",
  "serde",
  "sun-ast",

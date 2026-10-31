@@ -24,6 +24,8 @@ pub enum LexError {
     UnexpectedCharacter { character: char, offset: usize },
     #[error("unterminated string starting at byte {offset}")]
     UnterminatedString { offset: usize },
+    #[error("unterminated block comment starting at byte {offset}")]
+    UnterminatedBlockComment { offset: usize },
     #[error("invalid number starting at byte {offset}")]
     InvalidNumber { offset: usize },
 }
@@ -61,6 +63,7 @@ impl Lexer<'_> {
             match ch {
                 ' ' | '\t' | '\r' => { self.bump(); }
                 '\n' => { self.bump(); self.push(TokenKind::Newline, start); }
+                '%' if self.peek_next() == Some('{') => self.block_comment(start)?,
                 '%' => while self.peek().is_some_and(|c| c != '\n') { self.bump(); },
                 '0'..='9' => self.number(start)?,
                 'a'..='z' | 'A'..='Z' | '_' => {
@@ -119,6 +122,26 @@ impl Lexer<'_> {
             }
         }
         Ok(())
+    }
+
+    fn block_comment(&mut self, start: usize) -> Result<(), LexError> {
+        self.bump();
+        self.bump();
+        while let Some(c) = self.peek() {
+            if c == '%' && self.peek_next() == Some('}') {
+                self.bump();
+                self.bump();
+                return Ok(());
+            }
+            if c == '\n' {
+                let newline = self.offset;
+                self.bump();
+                self.push(TokenKind::Newline, newline);
+            } else {
+                self.bump();
+            }
+        }
+        Err(LexError::UnterminatedBlockComment { offset: start })
     }
 
     fn number(&mut self, start: usize) -> Result<(), LexError> {
@@ -244,5 +267,18 @@ mod tests {
         let tokens = lex("x = 1; % comment\ny = 2;").unwrap();
         assert!(tokens.iter().any(|token| token.kind == TokenKind::Newline));
         assert_eq!(tokens.iter().filter(|token| matches!(&token.kind, TokenKind::Ident(_))).count(), 2);
+    }
+
+    #[test]
+    fn ignores_block_comments_and_preserves_newlines() {
+        let tokens = lex("x = 1; %{ hidden\nstill hidden %}\ny = 2;").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(kinds.iter().filter(|kind| **kind == TokenKind::Newline).count(), 2);
+        assert_eq!(kinds.iter().filter(|kind| matches!(kind, TokenKind::Ident(_))).count(), 2);
+    }
+
+    #[test]
+    fn rejects_unterminated_block_comments() {
+        assert_eq!(lex("x = 1; %{ never closed"), Err(LexError::UnterminatedBlockComment { offset: 7 }));
     }
 }

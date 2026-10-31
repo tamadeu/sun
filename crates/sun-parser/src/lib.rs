@@ -11,8 +11,32 @@ pub enum ParseError {
     Lex(#[from] LexError),
     #[error("unexpected token at byte {offset}: expected {expected}")]
     UnexpectedToken { offset: usize, expected: &'static str },
+    #[error("predefined constant '{name}' at byte {offset} cannot be overwritten")]
+    ReservedConstant { name: String, offset: usize },
     #[error("'{keyword}' at byte {offset} is only valid inside a loop")]
     LoopControlOutsideLoop { offset: usize, keyword: &'static str },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PredefinedConstant {
+    Real(f64),
+    Complex { real: f64, imaginary: f64 },
+}
+
+pub fn predefined_constant(name: &str) -> Option<PredefinedConstant> {
+    match name {
+        "pi" => Some(PredefinedConstant::Real(std::f64::consts::PI)),
+        "Inf" => Some(PredefinedConstant::Real(f64::INFINITY)),
+        "NaN" => Some(PredefinedConstant::Real(f64::NAN)),
+        "eps" => Some(PredefinedConstant::Real(f64::EPSILON)),
+        "realmin" => Some(PredefinedConstant::Real(f64::MIN_POSITIVE)),
+        "realmax" => Some(PredefinedConstant::Real(f64::MAX)),
+        "flintmax" => Some(PredefinedConstant::Real(9_007_199_254_740_992.0)),
+        "intmin" => Some(PredefinedConstant::Real(i32::MIN as f64)),
+        "intmax" => Some(PredefinedConstant::Real(i32::MAX as f64)),
+        "i" | "j" => Some(PredefinedConstant::Complex { real: 0.0, imaginary: 1.0 }),
+        _ => None,
+    }
 }
 
 pub fn parse(source: &str) -> Result<Module, ParseError> {
@@ -55,7 +79,15 @@ impl Parser {
     fn identifier(&mut self, expected: &'static str) -> Result<String, ParseError> {
         let token = self.expect(|kind| matches!(kind, TokenKind::Ident(_)), expected)?;
         let TokenKind::Ident(name) = token.kind else { unreachable!() };
+        Self::ensure_bindable(&name, token.span.start)?;
         Ok(name)
+    }
+
+    fn ensure_bindable(name: &str, offset: usize) -> Result<(), ParseError> {
+        if predefined_constant(name).is_some() {
+            return Err(ParseError::ReservedConstant { name: name.into(), offset });
+        }
+        Ok(())
     }
 
     fn condition_header(&mut self, expected: &'static str) -> Result<Expr, ParseError> {
@@ -107,6 +139,7 @@ impl Parser {
             self.advance();
             let token = self.expect(|kind| matches!(kind, TokenKind::Ident(_)), "loop variable after for")?;
             let TokenKind::Ident(name) = token.kind else { unreachable!() };
+            Self::ensure_bindable(&name, token.span.start)?;
             self.expect(|kind| matches!(kind, TokenKind::Equal), "= after for variable")?;
             let source = self.expression(0)?;
             let range = match &source.kind {
@@ -177,7 +210,9 @@ impl Parser {
             let body = self.block(&[TokenKind::Catch, TokenKind::End])?;
             self.expect(|kind| matches!(kind, TokenKind::Catch), "catch in try block")?;
             let catch_name = if matches!(self.peek().kind, TokenKind::Ident(_)) {
-                let TokenKind::Ident(name) = self.advance().kind.clone() else { unreachable!() };
+                let token = self.advance().clone();
+                let TokenKind::Ident(name) = token.kind else { unreachable!() };
+                Self::ensure_bindable(&name, token.span.start)?;
                 Some(name)
             } else { None };
             self.expect(|kind| matches!(kind, TokenKind::Newline | TokenKind::Semicolon), "newline or semicolon after catch or its exception variable")?;
@@ -212,6 +247,7 @@ impl Parser {
                 } else { None };
                 self.expect(|kind| matches!(kind, TokenKind::RightParen), ")")?;
                 if !matches!(self.peek().kind, TokenKind::Equal) { return Ok(None); }
+                Self::ensure_bindable(&name, start)?;
                 self.advance();
                 let value = self.expression(0)?;
                 let end = value.span.end;
@@ -231,6 +267,7 @@ impl Parser {
         }
         if let (TokenKind::Ident(name), TokenKind::Equal) = (&self.peek().kind, &self.peek_n(1).kind) {
             let name = name.clone();
+            Self::ensure_bindable(&name, start)?;
             self.advance();
             self.advance();
             let value = self.expression(0)?;
@@ -268,7 +305,14 @@ impl Parser {
             TokenKind::Number(value) => Expr { kind: ExprKind::Number(value), span: token.span },
             TokenKind::Bool(value) => Expr { kind: ExprKind::Bool(value), span: token.span },
             TokenKind::String(value) => Expr { kind: ExprKind::String(value), span: token.span },
-            TokenKind::Ident(name) => Expr { kind: ExprKind::Identifier(name), span: token.span },
+            TokenKind::Ident(name) => {
+                let kind = match predefined_constant(&name) {
+                    Some(PredefinedConstant::Real(value)) => ExprKind::Number(value),
+                    Some(PredefinedConstant::Complex { real, imaginary }) => ExprKind::Complex { real, imaginary },
+                    None => ExprKind::Identifier(name),
+                };
+                Expr { kind, span: token.span }
+            }
             TokenKind::End if self.argument_depth > 0 => Expr { kind: ExprKind::IndexEnd, span: token.span },
             TokenKind::Plus | TokenKind::Minus | TokenKind::Bang => {
                 let op = match token.kind {
@@ -402,6 +446,35 @@ fn infix_binding_power(kind: &TokenKind) -> Option<(u8, u8, BinaryOp)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_predefined_constants_as_literals() {
+        let module = parse("values = [pi, Inf, NaN, eps, realmin, realmax, flintmax, intmin, intmax];").unwrap();
+        let StmtKind::Assign { value, .. } = &module.statements[0].kind else { panic!("expected assignment") };
+        let ExprKind::Matrix(rows) = &value.kind else { panic!("expected matrix") };
+        let values: Vec<_> = rows[0].iter().map(|expr| match expr.kind { ExprKind::Number(value) => value, _ => panic!("expected number") }).collect();
+        assert_eq!(values[0], std::f64::consts::PI);
+        assert!(values[1].is_infinite());
+        assert!(values[2].is_nan());
+        assert_eq!(values[3..], [f64::EPSILON, f64::MIN_POSITIVE, f64::MAX, 9_007_199_254_740_992.0, i32::MIN as f64, i32::MAX as f64]);
+        for name in ["i", "j"] {
+            let module = parse(name).unwrap();
+            let StmtKind::Expr(expr) = &module.statements[0].kind else { panic!("expected expression") };
+            assert!(matches!(expr.kind, ExprKind::Complex { real: 0.0, imaginary: 1.0 }));
+        }
+    }
+
+    #[test]
+    fn rejects_overwriting_predefined_constants_in_every_binding() {
+        for source in [
+            "pi = 3;", "Inf(1) = 0;", "for eps = 1:2; end", "try; catch NaN; end",
+            "function pi(); end", "function realmax = value(); end", "function value(flintmax); end", "i = 2;", "for j = 1:2; end",
+        ] {
+            assert!(matches!(parse(source), Err(ParseError::ReservedConstant { .. })), "accepted {source}");
+        }
+        assert!(parse("true = 0;").is_err());
+        assert!(parse("false = 1;").is_err());
+    }
 
     #[test]
     fn parses_parfor_range_as_one_statement() {

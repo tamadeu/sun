@@ -13,5 +13,6 @@ repository = "https://github.com/tamadeu/sun"
 thiserror = "2"
 ndarray = "0.16"
 approx = "0.5"
+num-complex = "0.4"
 clap = { version = "4", features = ["derive"] }
 inkwell = { version = "0.5", features = ["llvm18-0"] }

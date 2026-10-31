@@ -1,0 +1,8 @@
+disp("Palavras reservadas:");
+disp(keywords());
+
+disp("Constantes:");
+disp(constants());
+
+disp("Funcoes nativas:");
+disp(builtins());

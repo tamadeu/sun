@@ -54,7 +54,7 @@ fn elementary_functions_map_matrices_and_preserve_empty_shapes() {
         assert_eq!(output(&source), ["true", "[2, 2]", "[0, 3]"], "{name}");
     }
     assert_eq!(output("disp(sqrt([1,4;9,16])); disp(abs([-2,3])); disp(log([0,1])); disp(sqrt([-1]));"),
-        ["[1, 2; 3, 4]", "[2, 3]", "[-inf, 0]", "[NaN]"]);
+        ["[1, 2; 3, 4]", "[2, 3]", "[-Inf, 0]", "[NaN]"]);
 }
 
 #[test]

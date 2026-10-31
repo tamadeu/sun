@@ -1,0 +1,9 @@
+disp(pi);
+disp(Inf);
+disp(NaN);
+disp(eps);
+disp(realmin);
+disp(realmax);
+disp(flintmax);
+disp(intmin);
+disp(intmax);
